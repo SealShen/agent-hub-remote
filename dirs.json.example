@@ -1,0 +1,4 @@
+[
+  { "alias": "home", "path": "C:\\Users\\<you>", "label": "home" },
+  { "alias": "project-a", "path": "C:\\Users\\<you>\\code\\project-a", "label": "Project A" }
+]

@@ -1,0 +1,10 @@
+# Local configuration and runtime state. These files can contain local paths,
+# conversation logs, or private auth metadata and must stay out of git.
+.env
+dirs.json
+.state/
+node_modules/
+*.log
+auth-audit.jsonl
+*.ts.net.crt
+*.ts.net.key
