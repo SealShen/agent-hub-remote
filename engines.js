@@ -73,6 +73,7 @@ function _captureRateLimitEvent(ev) {
 
 const BRIDGE_TRANSCRIPT_MAX_TURNS = 2;   // ≤2 輪全文轉錄，>2 走 Gemma 摘要（plan §A2）
 const CLAUDE_MODELS = new Set(['sonnet', 'opus', 'haiku']);   // 防跨引擎 model carry-over（見 buildEngine 內濾）
+const CLAUDE_MODEL_PRIORITY = ['sonnet', 'opus', 'haiku'];
 
 export function killTree(proc) {
   if (!proc || proc.killed || proc.exitCode != null) return false;
@@ -93,6 +94,29 @@ function claudeUserLine(text) {
     },
     parent_tool_use_id: null,
   }) + '\n';
+}
+
+export function claudeModelFallbackArgs(modelArg) {
+  const current = String(modelArg || '').toLowerCase();
+  const idx = CLAUDE_MODEL_PRIORITY.indexOf(current);
+  const next = idx >= 0 ? CLAUDE_MODEL_PRIORITY[idx + 1] : null;
+  // Claude CLI has one fallback slot; AHR retries the rest of the chain itself.
+  return next ? ['--fallback-model', next] : [];
+}
+
+export function claudeModelAttemptChain(modelArg) {
+  if (!modelArg) return [null];
+  const raw = String(modelArg);
+  const idx = CLAUDE_MODEL_PRIORITY.indexOf(raw.toLowerCase());
+  return idx >= 0 ? CLAUDE_MODEL_PRIORITY.slice(idx) : [raw];
+}
+
+export function isClaudeModelStartupFailure(reason) {
+  const text = String(reason || '').toLowerCase();
+  return /\bmodel\b/.test(text) && (
+    /not available|not exist|does not exist|not found|no access|not have access|do not have access/.test(text) ||
+    /overloaded|unavailable|selected model|fallback model/.test(text)
+  );
 }
 
 export function canAcceptLiveInput(session) {
@@ -336,11 +360,15 @@ export async function runEngine(session, userText, opts) {
     if (engine === 'claude' && /^gpt-/i.test(rawModel)) modelArg = null;
   }
 
-  let bin, args;
+  let bin;
+  const claudeModelAttempts = engine === 'claude' ? claudeModelAttemptChain(modelArg) : [modelArg];
+
+  function startProcess(activeModelArg = modelArg, modelAttemptIndex = 0) {
+  let args;
   if (engine === 'claude') {
     args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
     if (danger) args.push('--dangerously-skip-permissions');
-    if (modelArg) args.push('--model', modelArg);
+    if (activeModelArg) args.push('--model', activeModelArg, ...claudeModelFallbackArgs(activeModelArg));
     if (nativeResumeId) args.push('--resume', nativeResumeId);
     bin = 'claude';
   } else {
@@ -377,6 +405,7 @@ export async function runEngine(session, userText, opts) {
   session._activeEngine = engine;
   session._acceptsLiveInput = engine === 'claude';
   session._endingInput = false;
+  session._activeModel = activeModelArg ?? null;
   session.pid = proc.pid;       // 持久化 PID 供重啟收屍（plan #6）
   persistIndex();
 
@@ -403,7 +432,7 @@ export async function runEngine(session, userText, opts) {
         session_id: session.id,
         native_session_id: session.engineRefs.claude || ev.session_id,
         cwd: session.cwd,
-        model: session.model || null,
+        model: session._activeModel || session.model || null,
         turn_ts: ev.timestamp,
       });
     }
@@ -473,7 +502,7 @@ export async function runEngine(session, userText, opts) {
         session_id: session.id,
         native_session_id: session.engineRefs.codex,
         cwd: session.cwd,
-        model: session.model || null,
+        model: session._activeModel || session.model || null,
       });
       return;
     }
@@ -555,6 +584,11 @@ export async function runEngine(session, userText, opts) {
       session._activeEngine = null; session._acceptsLiveInput = false; session._endingInput = false;
     }
     const wasCancelled = !!session.cancelled;
+    const failureReason = code !== 0
+      ? [((session._stderrBuf || '').trim()),
+         (engine === 'codex' ? (session._codexTextBuf || '').trim() : '')]
+          .filter(Boolean).join('\n').slice(-1000) || `exit ${code}`
+      : '';
     if (wasCancelled) {
       session.status = 'idle';
       session.cancelled = false;
@@ -562,6 +596,22 @@ export async function runEngine(session, userText, opts) {
       // 下一輪照常先試原生 resume；resume 失敗才由 continuationPlan gate
       // 徵詢同意後改走 bridge。絕不因取消而無脈絡開新。
     } else {
+      const nextClaudeModel = engine === 'claude'
+        && code !== 0
+        && !session._emittedText
+        && isClaudeModelStartupFailure(failureReason)
+        && modelAttemptIndex < claudeModelAttempts.length - 1
+        ? claudeModelAttempts[modelAttemptIndex + 1]
+        : null;
+      if (nextClaudeModel) {
+        const current = activeModelArg || 'default';
+        const note = `Claude model ${current} unavailable; retrying ${nextClaudeModel}.`;
+        const ts = appendMsg(session, { role: 'system', kind: 'swap', engine, text: note });
+        session.status = 'running';
+        broadcast({ type: 'msg', id: session.id, ts, role: 'system', kind: 'swap', text: note, engine });
+        broadcast({ type: 'sessions', data: sessionsArr() });
+        return startProcess(nextClaudeModel, modelAttemptIndex + 1);
+      }
       session.status = code === 0 ? 'idle' : 'error';
       if (code === 0) {
         session._resumeFailed = false;   // 成功一輪即清除 resume 失敗標記
@@ -574,9 +624,7 @@ export async function runEngine(session, userText, opts) {
         if (session._usedNativeResume) session._resumeFailed = true;
         // 非零退出 → 補真診斷（對齊 legacy codex-runner.js:136）：
         // 緩衝的 stderr 尾段;無 stderr 時退而求其次 `exit <code>`。
-        const stderr = (session._stderrBuf || '').trim();
-        const codexOut = engine === 'codex' ? (session._codexTextBuf || '').trim() : '';
-        const reason = [stderr, codexOut].filter(Boolean).join('\n').slice(-1000) || `exit ${code}`;
+        const reason = failureReason;
         const ts = appendMsg(session, { role: 'error', engine, text: reason });
         broadcast({ type: 'msg', id: session.id, ts, text: `⚠️ ${reason}`, error: true, engine });
       }
@@ -589,7 +637,7 @@ export async function runEngine(session, userText, opts) {
         session_id: session.id,
         native_session_id: session.engineRefs.codex || session._codexTurnUsage.native_session_id,
         cwd: session.cwd,
-        model: session.model || null,
+        model: session._activeModel || session.model || null,
       };
       try {
         recordCodexTurnUsage(turnUsage);
@@ -604,7 +652,7 @@ export async function runEngine(session, userText, opts) {
         session_id: session.id,
         native_session_id: session.engineRefs.claude || session._claudeTurnUsage.native_session_id,
         cwd: session.cwd,
-        model: session.model || null,
+        model: session._activeModel || session.model || null,
       };
     }
     if (!wasCancelled && code === 0 && engine === 'codex') {
@@ -633,4 +681,7 @@ export async function runEngine(session, userText, opts) {
   });
 
   return proc;
+  }
+
+  return startProcess(claudeModelAttempts[0], 0);
 }

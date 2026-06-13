@@ -8,11 +8,13 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSCommandPath
 $wrapper = Join-Path $root 'ahr_wrapper.ps1'
+$launcher = Join-Path $root 'run-wrapper-hidden.vbs'
 if (-not (Test-Path $wrapper)) { throw "Missing wrapper: $wrapper" }
+if (-not (Test-Path $launcher)) { throw "Missing launcher: $launcher" }
 
 $envFile = Join-Path $root '.env'
 if (Test-Path $envFile) {
-  foreach ($line in Get-Content $envFile) {
+  foreach ($line in Get-Content -Encoding UTF8 $envFile) {
     if ($line -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$' -and -not $line.TrimStart().StartsWith('#')) {
       $name = $matches[1]; $value = $matches[2] -replace '^["'']|["'']$',''
       if (-not (Test-Path "env:$name")) { Set-Item "env:$name" $value }
@@ -22,8 +24,8 @@ if (Test-Path $envFile) {
 
 $taskName = if ($env:AHR_TASK_NAME) { $env:AHR_TASK_NAME } else { 'AgentHubRemote' }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrapper`"" `
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+  -Argument "`"$launcher`"" `
   -WorkingDirectory $root
 
 $trigLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
