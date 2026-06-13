@@ -23,4 +23,13 @@ export function loadLocalEnv(filePath = path.join(__dirname, '.env')) {
   }
 }
 
+// Parse an HTTP port from a candidate env value. Returns `fallback` (default 3334)
+// whenever the value is missing or not a valid 1..65535 integer, so callers never
+// end up binding NaN. Shared by server.js and auth.js to keep the port — and the
+// WebAuthn origin derived from it — consistent.
+export function parsePort(value, fallback = 3334) {
+  const n = parseInt(value, 10);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : fallback;
+}
+
 loadLocalEnv();

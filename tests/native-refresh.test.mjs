@@ -42,7 +42,9 @@ try {
     line('response_item', {
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text: 'hello codex native refresh' }],
+      // 實際 runtime 形狀：bootstrap 與使用者文字在「同一則」user message
+      // （engines.js codexPromptForSession 前置注入）
+      content: [{ type: 'input_text', text: '# Codex workspace bootstrap\n\nBefore non-trivial work in this workspace, read these files in order:\n\n---\n\nhello codex native refresh' }],
     }, 1000),
     line('response_item', {
       type: 'message',
@@ -59,6 +61,7 @@ try {
   assert.equal(rec.agentType, 'codex');
   assert.equal(rec.engineRefs.codex, nativeId);
   assert.equal(rec.nativePath, nativePath);
+  assert.equal(rec.name, 'hello codex native refresh');
 
   const messages = loadMessages(hubId, 0);
   assert.deepEqual(messages.map(m => m.text), [

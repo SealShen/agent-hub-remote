@@ -37,6 +37,20 @@ function _hhmm(ms) {
   return d.toTimeString().slice(0, 5);
 }
 
+function _engineRefs(m) {
+  const refs = m && m.engineRefs ? m.engineRefs : {};
+  return { claude: refs.claude || null, codex: refs.codex || null };
+}
+
+function _resetIdLine(reset) {
+  const refs = reset && reset.previousEngineRefs ? reset.previousEngineRefs : null;
+  if (!refs) return '';
+  const parts = [];
+  if (refs.claude) parts.push(`old claude id: ${refs.claude}`);
+  if (refs.codex) parts.push(`old codex id: ${refs.codex}`);
+  return parts.length ? parts.join('\n') : '';
+}
+
 let _dirs = [];   // [{alias,label,path}]
 function _cwdToAlias(cwd) {
   if (!cwd) return null;
@@ -51,11 +65,21 @@ function _cwdToAlias(cwd) {
   return best ? best.alias : cwd;
 }
 
+window.AHR_CLAUDE_MODELS = [
+  { id: 'sonnet', label: 'sonnet', sub: 'default · fast' },
+  { id: 'opus', label: 'opus', sub: 'deep · slow' },
+  { id: 'haiku', label: 'haiku', sub: 'cheap · trivia' },
+];
+window.AHR_CLAUDE_MODEL_ORDER = window.AHR_CLAUDE_MODELS.map(m => m.id);
+
 window.AHR_modelLabel = function (value, engine) {
   const isSession = value && typeof value === 'object';
   const agentType = engine || (isSession ? value.agentType : null);
   const model = isSession ? value.model : value;
   if (agentType === 'codex') return 'GPT';
+  // 完整 claude-* ID 縮成家族名顯示（claude-fable-5 → fable）
+  const m = /^claude-([a-z]+)/i.exec(model || '');
+  if (m) return m[1].toLowerCase();
   return model || '';
 };
 
@@ -74,6 +98,8 @@ window.AHR_mapSession = function (m) {
     accent: _accentOf(m.id),
     _cwdAbs: m.cwd,
     _lastEngine: m.lastEngine || null,
+    _engineRefs: _engineRefs(m),
+    _contextReset: m.contextReset || null,
   };
 };
 
@@ -87,11 +113,12 @@ window.AHR_mapMsg = function (m, sessEngine) {
   if (m.role === 'error')
     return { t: 'system', kind: 'error', text: m.text || 'error', ts, _key: key };
   // system
-  const txt = m.text || '';
+  const resetLine = _resetIdLine(m.contextReset);
+  const txt = (m.text || '') + (resetLine ? '\n' + resetLine : '');
   let kind = m.kind || 'info';
   if (/^↻|重啟|interrupted|中斷/.test(txt)) kind = 'restart';
   else if (/^↪|帶入前文脈絡|脈絡/.test(txt)) kind = 'swap';
-  return { t: 'system', kind, text: txt, ts, _key: key };
+  return { t: 'system', kind, text: txt, ts, contextReset: m.contextReset || null, _key: key };
 };
 
 // ── §F API（皆走相對路徑；cookie 由瀏覽器帶）────────────────────────────────
@@ -102,7 +129,15 @@ async function _j(method, url, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   let j = null; try { j = await r.json(); } catch {}
-  if (!r.ok) { const e = new Error((j && j.error) || ('HTTP ' + r.status)); e.status = r.status; e.body = j; throw e; }
+  if (!r.ok) {
+    if (j && j.needStartupVerification) {
+      window.dispatchEvent(new CustomEvent('ahr_startup_required', { detail: j }));
+    }
+    const e = new Error((j && j.error) || ('HTTP ' + r.status));
+    e.status = r.status;
+    e.body = j;
+    throw e;
+  }
   return j;
 }
 
@@ -344,6 +379,14 @@ window.AHR = {
   // 用量監測（概念對齊 aqua5230/usage）：5h/7d 配額 + 今日 token/cost + 7 日趨勢
   usage(force) { return _j('GET', '/usage' + (force ? '?force=1' : '')); },
   restartServer(actionToken) { return _j('POST', '/server/restart', { actionToken }); },
+  startupStatus() { return _j('GET', '/startup/status'); },
+  startupUnlock(actionToken) { return _j('POST', '/startup/unlock', { actionToken }); },
+  localTokenStatus() { return _j('GET', '/local-token/status'); },
+  requestLocalToken(reason) { return _j('POST', '/local-token/request', { reason: reason || 'local orchestration' }); },
+  localTokenRequestPending() { return _j('GET', '/local-token/request/pending'); },
+  clearLocalTokenRequest() { return _j('POST', '/local-token/request/clear', {}); },
+  mintLocalToken(actionToken) { return _j('POST', '/local-token/mint', { actionToken }); },
+  revokeLocalToken() { return _j('POST', '/local-token/revoke', {}); },
 
   liveInput(sid, text) {
     return _j('POST', `/session/${sid}/live-input`, { text });
@@ -352,7 +395,7 @@ window.AHR = {
   rename(sid, name) { return _j('POST', `/session/${sid}/rename`, { name }); },
 
   // Step-up（spec §5.1）：拿一次性 action-token 換危險動作
-  //   action: 'restart' | 'autoallow-on' | 'create-with-autoallow'
+  //   action: 'restart' | 'autoallow-on' | 'create-with-autoallow' | 'startup' | 'mint-local-token' | 'review-flow'
   //   sessionId: action !== 'restart' 時必填
   stepUpTotp({ code, action, sessionId }) {
     return _j('POST', '/step-up/totp', { code, action, ...(sessionId ? { sessionId } : {}) });
@@ -393,10 +436,18 @@ window.AHR = {
         } else if (o.type === 'done') onDone && onDone(o.id, o.code);
         else if (o.type === 'thread_reload') onReload && onReload(o.id);
         else if (o.type === 'usage_update') window.dispatchEvent(new CustomEvent('ahr_usage_update'));
+        else if (o.type === 'local_token_request') {
+          window.dispatchEvent(new CustomEvent('ahr_local_token_request', { detail: o }));
+        }
       };
       ws.onclose = () => {
         if (closedByUs) return;
         onState && onState('down');
+        window.AHR.startupStatus().then(status => {
+          if (status && !status.verified) {
+            window.dispatchEvent(new CustomEvent('ahr_startup_required', { detail: status }));
+          }
+        }).catch(() => {});
         setTimeout(open, backoff);
         backoff = Math.min(backoff * 2, 15000);
       };

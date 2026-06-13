@@ -6,16 +6,17 @@
   "description": "Self-hosted browser control panel for local Claude Code and Codex sessions, with localhost or private Tailscale access.",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/tool-display.test.mjs && node tests/context-projection.test.mjs && node tests/context-controls.test.mjs && node tests/rewind-context.test.mjs && node tests/native-refresh.test.mjs && node tests/bridge-native.test.mjs && node tests/auto-commit.test.mjs && node tests/usage-core.test.mjs && node tests/model-fallback.test.mjs",
+    "test": "node tests/tool-display.test.mjs && node tests/context-projection.test.mjs && node tests/context-controls.test.mjs && node tests/rewind-context.test.mjs && node tests/native-refresh.test.mjs && node tests/claude-session-identity.test.mjs && node tests/bridge-native.test.mjs && node tests/codex-bootstrap.test.mjs && node tests/claim-native-twin.test.mjs && node tests/cleanup-twins.test.mjs && node tests/parse-port.test.mjs && node tests/auto-commit.test.mjs && node tests/usage-core.test.mjs && node tests/startup-gate.test.mjs",
     "test:tool-display": "node tests/tool-display.test.mjs",
     "test:context-projection": "node tests/context-projection.test.mjs",
     "test:context-controls": "node tests/context-controls.test.mjs",
     "test:rewind-context": "node tests/rewind-context.test.mjs",
     "test:auto-commit": "node tests/auto-commit.test.mjs",
     "test:bridge-native": "node tests/bridge-native.test.mjs",
+    "test:codex-bootstrap": "node tests/codex-bootstrap.test.mjs",
     "test:native-refresh": "node tests/native-refresh.test.mjs",
     "test:usage-core": "node tests/usage-core.test.mjs",
-    "test:model-fallback": "node tests/model-fallback.test.mjs"
+    "test:startup-gate": "node tests/startup-gate.test.mjs"
   },
   "dependencies": {
     "@simplewebauthn/server": "^11.0.0",

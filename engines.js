@@ -12,10 +12,12 @@
 //   （見 memory reference_codex_cli）。
 
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { appendMsg, loadMessages, persistIndex, sessionsArr } from './store.js';
+import { fileURLToPath } from 'url';
+import { absorbHubMessages, appendMsg, loadMessages, persistIndex, removeSession, sessions, sessionsArr } from './store.js';
 import { summarize } from './gemma.js';
 import {
   formatTurnUsageLine,
@@ -28,6 +30,8 @@ import {
 import { captureGitSnapshot, formatAutoCommitResult, runCodexAutoCommit } from './auto-commit.js';
 import { projectContextMessages } from './context-projection.js';
 import { formatClaudeToolResult, formatClaudeToolUse, formatCodexCommandExecution } from './tool-display.js';
+
+const codexBootstrapDir = path.dirname(fileURLToPath(import.meta.url));
 
 const _STATUS_JSON = path.join(os.homedir(), '.claude', 'usage-status.json');
 
@@ -73,27 +77,78 @@ function _captureRateLimitEvent(ev) {
 
 const BRIDGE_TRANSCRIPT_MAX_TURNS = 2;   // ≤2 輪全文轉錄，>2 走 Gemma 摘要（plan §A2）
 const CLAUDE_MODELS = new Set(['sonnet', 'opus', 'haiku']);   // 防跨引擎 model carry-over（見 buildEngine 內濾）
+// fable5 目前不可用：預設與 fallback 鏈改回 sonnet -> opus -> haiku（owner 決策 2026-06-13）
 const CLAUDE_MODEL_PRIORITY = ['sonnet', 'opus', 'haiku'];
+const CODEX_UNSUPPORTED_MODELS = new Set(['gpt-5-codex']);
 
-export function killTree(proc) {
-  if (!proc || proc.killed || proc.exitCode != null) return false;
-  if (process.platform === 'win32') {
-    spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true });
-  } else {
-    proc.kill('SIGTERM');
-  }
-  return true;
+function isPathInside(parent, candidate) {
+  const rel = path.relative(path.resolve(parent), path.resolve(candidate));
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function claudeUserLine(text) {
-  return JSON.stringify({
-    type: 'user',
-    message: {
-      role: 'user',
-      content: [{ type: 'text', text: String(text || '') }],
-    },
-    parent_tool_use_id: null,
-  }) + '\n';
+function expandHome(p, homeDir) {
+  if (!p) return '';
+  if (p === '~') return homeDir;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(homeDir, p.slice(2));
+  return p;
+}
+
+// Workspace-specific bootstrap injected ahead of the first codex prompt is
+// intentionally NOT baked into the source — it carries local paths and private
+// workflow rules. Configure it via a gitignored `codex-bootstrap.local.json`
+// (or `AHR_CODEX_BOOTSTRAP_CONFIG`); absent config means no injection.
+// Format: an object or array of `{ "workspaceRoot": "~/path", "bootstrap": "..." }`.
+// `bootstrap` should end with a `\n---` separator so ingest can strip it back off.
+function loadCodexWorkspaceConfigs({ homeDir = os.homedir(), configPath } = {}) {
+  const file = configPath
+    || process.env.AHR_CODEX_BOOTSTRAP_CONFIG
+    || path.join(codexBootstrapDir, 'codex-bootstrap.local.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  return list
+    .map((entry) => ({
+      root: expandHome(entry && entry.workspaceRoot, homeDir),
+      bootstrap: entry && typeof entry.bootstrap === 'string' ? entry.bootstrap : '',
+    }))
+    .filter((e) => e.root && e.bootstrap);
+}
+
+export function codexWorkspaceBootstrap(cwd, opts = {}) {
+  if (!cwd) return '';
+  const configs = loadCodexWorkspaceConfigs(opts);
+  for (const cfg of configs) {
+    if (isPathInside(cfg.root, cwd)) return cfg.bootstrap;
+  }
+  return '';
+}
+
+export function codexPromptForSession(session, prompt, opts = {}) {
+  const bootstrap = codexWorkspaceBootstrap(session?.cwd, opts);
+  return bootstrap ? `${bootstrap}\n\n${prompt}` : prompt;
+}
+
+function normalizedModelArg(engine, model) {
+  const raw = model && model !== 'default' ? String(model) : null;
+  if (!raw) return null;
+  if (engine === 'codex') {
+    const lower = raw.toLowerCase();
+    if (CLAUDE_MODELS.has(lower) || /^claude-/i.test(raw)) return null;
+    if (CODEX_UNSUPPORTED_MODELS.has(lower)) return null;
+    return raw;
+  }
+  if (/^gpt-/i.test(raw)) return null;
+  return raw;
 }
 
 export function claudeModelFallbackArgs(modelArg) {
@@ -117,6 +172,27 @@ export function isClaudeModelStartupFailure(reason) {
     /not available|not exist|does not exist|not found|no access|not have access|do not have access/.test(text) ||
     /overloaded|unavailable|selected model|fallback model/.test(text)
   );
+}
+
+export function killTree(proc) {
+  if (!proc || proc.killed || proc.exitCode != null) return false;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true });
+  } else {
+    proc.kill('SIGTERM');
+  }
+  return true;
+}
+
+function claudeUserLine(text) {
+  return JSON.stringify({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: String(text || '') }],
+    },
+    parent_tool_use_id: null,
+  }) + '\n';
 }
 
 export function canAcceptLiveInput(session) {
@@ -292,6 +368,33 @@ export function continuationPlan(session, { engine, hasHistory, confirmBridge = 
 //   forceBridge：server gate（continuationPlan）判定無法原生 resume——resume 曾
 //     失敗且已同意，或同引擎但無原生指標——要求改用 messages[] 重建脈絡接續。
 //     硬性不變式：有前文者絕不無脈絡開新（claude / codex 同一套，無特例）。
+export function claudeSessionIdentityArgs(session, nativeResumeId, { sessionIdOverride = null } = {}) {
+  if (nativeResumeId) return { args: ['--resume', nativeResumeId], expectedSessionId: null };
+  const sessionId = sessionIdOverride || session.id;
+  return { args: ['--session-id', sessionId], expectedSessionId: sessionId };
+}
+
+export function shouldStartFreshClaudeThread({ engine, pendingContext = false, prevEngine = null, forceBridge = false }) {
+  return engine === 'claude' && !!(pendingContext || forceBridge || (prevEngine && prevEngine !== engine));
+}
+
+export function claimClaudeNativeSession(session, nativeId) {
+  if (!session || !nativeId) return { changed: false, removedTwin: false };
+  session.engineRefs ||= { claude: null, codex: null };
+  const previous = session.engineRefs.claude || null;
+  session.engineRefs.claude = nativeId;
+  let removedTwin = false;
+  let movedMessages = 0;
+  const nativeTwin = sessions.get(nativeId);
+  if (nativeTwin && nativeTwin.id !== session.id && nativeTwin.source === 'native' && nativeTwin.agentType === 'claude') {
+    // The twin's hub JSONL may already hold hub-appended messages. Merge them into the
+    // owner before deleting the log so removeSession(deleteLog:true) can't drop them.
+    movedMessages = absorbHubMessages(nativeId, session);
+    removedTwin = removeSession(nativeId, { deleteLog: true });
+  }
+  return { changed: previous !== nativeId, previous, current: nativeId, removedTwin, movedMessages };
+}
+
 export async function runEngine(session, userText, opts) {
   const { broadcast, isResumeTap = false, forceBridge = false } = opts;
   const engine = session.agentType === 'codex' ? 'codex' : 'claude';
@@ -301,9 +404,11 @@ export async function runEngine(session, userText, opts) {
   // ── 決定 resume vs bridge vs 全新 ──
   let nativeResumeId = null;
   let preamble = '';
+  let claudeSessionIdOverride = null;
   const pendingContext = session.pendingContext || null;
   const prevEngine = pendingContext ? null : session.lastEngine;
   session._usedNativeResume = false;   // 本輪是否走原生 resume（close handler 判 resume 失敗用）
+  delete session._expectedClaudeSessionId;
 
   if (pendingContext) {
     preamble = pendingContextPreamble(pendingContext);
@@ -338,6 +443,9 @@ export async function runEngine(session, userText, opts) {
     session.engineRefs[engine] = null;
     session._resumeFailed = false;
   }
+  if (shouldStartFreshClaudeThread({ engine, pendingContext: !!pendingContext, prevEngine, forceBridge })) {
+    claudeSessionIdOverride = crypto.randomUUID();
+  }
   // 其餘 = 真‧無前文的新 session → 開新（continuationPlan 保證不會讓有前文者走到這）
 
   session.status = 'running';
@@ -346,6 +454,10 @@ export async function runEngine(session, userText, opts) {
   broadcast({ type: 'sessions', data: sessionsArr() });
 
   const fullPrompt = preamble + userText;
+  // workspace bootstrap 只注入新 codex thread；原生 resume 的 thread 首輪已含同段內容
+  const enginePrompt = engine === 'codex' && !nativeResumeId
+    ? codexPromptForSession(session, fullPrompt)
+    : fullPrompt;
   const spawnEnv = { ...process.env };
   delete spawnEnv.ANTHROPIC_API_KEY;   // 走訂閱 OAuth，勿用 API key（memory）
 
@@ -353,12 +465,7 @@ export async function runEngine(session, userText, opts) {
   // data.js 已正規化;此處再防一道（codex ChatGPT 帳號送 gpt-5-codex/claude 名 → 400）。
   // 跨引擎切換 session.model 不會 reset（server.js 只在使用者主動改才覆寫），
   // 所以這裡按引擎相容濾：claude 模型名餵給 codex / gpt 模型名餵給 claude，皆退回帳號預設。
-  const rawModel = session.model && session.model !== 'default' ? session.model : null;
-  let modelArg = rawModel;
-  if (rawModel) {
-    if (engine === 'codex' && (CLAUDE_MODELS.has(rawModel) || /^claude-/i.test(rawModel))) modelArg = null;
-    if (engine === 'claude' && /^gpt-/i.test(rawModel)) modelArg = null;
-  }
+  const modelArg = normalizedModelArg(engine, session.model);
 
   let bin;
   const claudeModelAttempts = engine === 'claude' ? claudeModelAttemptChain(modelArg) : [modelArg];
@@ -369,7 +476,13 @@ export async function runEngine(session, userText, opts) {
     args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
     if (danger) args.push('--dangerously-skip-permissions');
     if (activeModelArg) args.push('--model', activeModelArg, ...claudeModelFallbackArgs(activeModelArg));
-    if (nativeResumeId) args.push('--resume', nativeResumeId);
+    const identity = claudeSessionIdentityArgs(session, nativeResumeId, { sessionIdOverride: claudeSessionIdOverride });
+    args.push(...identity.args);
+    if (identity.expectedSessionId) {
+      session.engineRefs ||= { claude: null, codex: null };
+      session.engineRefs.claude = identity.expectedSessionId;
+      session._expectedClaudeSessionId = identity.expectedSessionId;
+    }
     bin = 'claude';
   } else {
     // Codex §三-3 / #12（codex 0.130.0 實測 `codex exec --help`）：
@@ -405,14 +518,16 @@ export async function runEngine(session, userText, opts) {
   session._activeEngine = engine;
   session._acceptsLiveInput = engine === 'claude';
   session._endingInput = false;
+  // 本輪實際服務的 model（含 fallback 降級後的當前 attempt）；每次 spawn/retry 都覆寫，
+  // 不持久化、不汙染使用者選定的 session.model（見下方 retry block）。供 usage 歸因用。
   session._activeModel = activeModelArg ?? null;
   session.pid = proc.pid;       // 持久化 PID 供重啟收屍（plan #6）
   persistIndex();
 
   if (engine === 'claude') {
-    proc.stdin.write(claudeUserLine(fullPrompt), 'utf8');
+    proc.stdin.write(claudeUserLine(enginePrompt), 'utf8');
   } else {
-    proc.stdin.write(fullPrompt, 'utf8');
+    proc.stdin.write(enginePrompt, 'utf8');
     proc.stdin.end();
   }
 
@@ -424,7 +539,19 @@ export async function runEngine(session, userText, opts) {
   session._codexTextBuf = '';     // Codex 非 JSON stdout 緩衝（error 診斷）
 
   function onClaudeEvent(ev) {
-    if (ev.session_id) session.engineRefs.claude = ev.session_id;
+    let identityChanged = false;
+    let removedNativeTwin = false;
+    if (ev.session_id) {
+      if (session._expectedClaudeSessionId && ev.session_id !== session._expectedClaudeSessionId) {
+        console.error(`[agent-hub-remote] claude session id mismatch for hub ${session.id}: expected ${session._expectedClaudeSessionId}, got ${ev.session_id}`);
+      }
+      const claim = claimClaudeNativeSession(session, ev.session_id);
+      identityChanged = claim.changed;
+      removedNativeTwin = claim.removedTwin;
+      if (removedNativeTwin) {
+        console.error(`[agent-hub-remote] removed native Claude twin ${ev.session_id} after hub ${session.id} claimed it`);
+      }
+    }
     if (ev.type === 'rate_limit_event') _captureRateLimitEvent(ev);
     const claudeUsage = ev?.message?.usage || ev?.usage;
     if (claudeUsage) {
@@ -476,6 +603,8 @@ export async function runEngine(session, userText, opts) {
       session._endingInput = true;
       proc.stdin.end();
     }
+    if (identityChanged || removedNativeTwin) persistIndex();
+    if (removedNativeTwin) broadcast({ type: 'sessions', data: sessionsArr() });
   }
 
   function fmtCodexItem(item) {
@@ -608,6 +737,9 @@ export async function runEngine(session, userText, opts) {
         const note = `Claude model ${current} unavailable; retrying ${nextClaudeModel}.`;
         const ts = appendMsg(session, { role: 'system', kind: 'swap', engine, text: note });
         session.status = 'running';
+        // 不改寫 session.model：保留使用者選定的 model，避免 incident 後黏在降級 model、
+        // 且 UI 選擇器仍顯示原選擇。本輪實際服務 model 由 startProcess 設的 _activeModel 反映，
+        // 下一輪仍從原 model 重試（fable 復原後自動回到 fable）。
         broadcast({ type: 'msg', id: session.id, ts, role: 'system', kind: 'swap', text: note, engine });
         broadcast({ type: 'sessions', data: sessionsArr() });
         return startProcess(nextClaudeModel, modelAttemptIndex + 1);

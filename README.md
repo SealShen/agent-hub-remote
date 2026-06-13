@@ -72,8 +72,9 @@ npm test
 
 ## Passkey Enrollment
 
-TOTP is required as the fail-closed fallback. Passkeys are optional but
-recommended for per-action step-up.
+TOTP is required as the fail-closed fallback. After each AHR server boot or
+restart, each browser must complete startup verification; passkey is preferred
+and TOTP remains the backup path.
 
 To open one passkey enrollment window:
 
@@ -186,6 +187,9 @@ Layer 2: application auth.
 
 The app uses a signed owner cookie and fails closed if `TOTP_SECRET` is missing.
 Passkey enrollment is controlled locally through `.state/auth/enroll.flag`.
+After every server boot or restart, each browser must complete startup
+verification before normal UI APIs and websockets are accepted. Passkey is tried
+first; TOTP remains available as backup.
 
 Layer 3: per-action step-up.
 

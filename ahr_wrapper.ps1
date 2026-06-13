@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Continue'
 
 $envFile = Join-Path (Get-Location) '.env'
 if (Test-Path $envFile) {
-  foreach ($line in Get-Content $envFile) {
+  foreach ($line in Get-Content -Encoding UTF8 $envFile) {
     if ($line -match '^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$' -and -not $line.TrimStart().StartsWith('#')) {
       $name = $matches[1]; $value = $matches[2] -replace '^["'']|["'']$',''
       if (-not (Test-Path "env:$name")) { Set-Item "env:$name" $value }
@@ -85,6 +85,8 @@ function Start-AhrServerProcess {
   $startInfo.CreateNoWindow = $true
   $startInfo.RedirectStandardOutput = $true
   $startInfo.RedirectStandardError = $true
+  $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $startInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 
   $process = New-Object System.Diagnostics.Process
   $process.StartInfo = $startInfo

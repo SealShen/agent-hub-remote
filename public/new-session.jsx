@@ -11,12 +11,14 @@ const ENGINES = [
     desc: 'gpt-5-codex · exec sandbox',   accent: 'var(--eng-cx)' },
 ];
 
+const CLAUDE_MODELS = window.AHR_CLAUDE_MODELS || [
+  { id: 'sonnet', label: 'sonnet', sub: 'default · fast' },
+  { id: 'opus', label: 'opus', sub: 'deep · slow' },
+  { id: 'haiku', label: 'haiku', sub: 'cheap · trivia' },
+];
+
 const MODELS = {
-  claude: [
-    { id: 'sonnet', label: 'sonnet', sub: 'default · fast' },
-    { id: 'opus',   label: 'opus',   sub: 'deep · slow'    },
-    { id: 'haiku',  label: 'haiku',  sub: 'cheap · trivia' },
-  ],
+  claude: CLAUDE_MODELS,
   codex: [
     { id: 'default', label: 'default', sub: 'account default' },
   ],
@@ -26,7 +28,7 @@ function NewSession({ onClose, onStart, sessions, projectFilter }) {
   const dirs = window.MOCK_DIRS;
   const [cwd,    setCwd]    = useStateNS(projectFilter || dirs[0].alias);
   const [engine, setEngine] = useStateNS('claude');
-  const [model,  setModel]  = useStateNS('sonnet');
+  const [model,  setModel]  = useStateNS(MODELS.claude[0].id);
   // auto-allow：純前端 toggle，start 時才 step-up（spec §5.4）
   const [autoOn, setAutoOn] = useStateNS(false);
   const [prompt, setPrompt] = useStateNS('');

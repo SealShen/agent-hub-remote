@@ -148,11 +148,21 @@ function codexPayloadText(payload) {
 }
 
 function isCodexUserNoise(text) {
-  return /^\s*(#\s*AGENTS\.md instructions|<environment_context>|You are Codex,|Knowledge cutoff:)/i.test(text || '');
+  return /^\s*(#\s*AGENTS\.md instructions|#\s*Codex workspace bootstrap|<environment_context>|You are Codex,|Knowledge cutoff:)/i.test(text || '');
+}
+
+// runEngine 對設定了 workspace bootstrap 的 cwd，codex prompt 會把 bootstrap 前置在「同一則」
+// user message（engines.js codexPromptForSession）；ingest 時剝掉前綴留真實使用者文字，
+// 剝完為空（或無分隔線的純 bootstrap）才整則略過。
+const CODEX_BOOTSTRAP_SEP = '\n---\n\n';
+function stripCodexBootstrap(text) {
+  if (!/^\s*#\s*Codex workspace bootstrap/i.test(text || '')) return text;
+  const i = text.indexOf(CODEX_BOOTSTRAP_SEP);
+  return i === -1 ? '' : text.slice(i + CODEX_BOOTSTRAP_SEP.length).trim();
 }
 
 function codexTitleText(payload) {
-  const text = codexPayloadText(payload).replace(/\s+/g, ' ').trim();
+  const text = stripCodexBootstrap(codexPayloadText(payload)).replace(/\s+/g, ' ').trim();
   if (!text || isCodexUserNoise(text)) return null;
   return text.slice(0, 60);
 }
@@ -364,7 +374,8 @@ export function loadCodexNative(nativePath, tail = 0) {
     const payload = ev.payload;
     if (!payload || payload.type !== 'message') continue;
     if (payload.role !== 'user' && payload.role !== 'assistant') continue;
-    const text = codexPayloadText(payload);
+    let text = codexPayloadText(payload);
+    if (payload.role === 'user') text = stripCodexBootstrap(text);
     if (!text || (payload.role === 'user' && isCodexUserNoise(text))) continue;
     msgs.push({
       role: payload.role,

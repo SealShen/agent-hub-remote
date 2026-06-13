@@ -38,9 +38,10 @@ function ProjectChips({ projectFilter, setProjectFilter, sessions, onNew }) {
   );
 }
 
-function SessRow({ s, active, onTap, onStop, onLongPress }) {
+function SessRow({ s, active, onTap, onStop, onLongPress, unread }) {
   const accent = window.ACCENTS[s.accent || 0];
   const showStop = s.status === 'running' || s.status === 'starting';
+  const unreadCount = unread > 0 ? unread : 0;
   const longPress = window.useLongPress
     ? window.useLongPress(() => onLongPress?.(s), 480)
     : {};
@@ -69,6 +70,11 @@ function SessRow({ s, active, onTap, onStop, onLongPress }) {
           <span>{window.formatRelative(s.updatedAt)}</span>
         </div>
       </div>
+      {unreadCount > 0 && (
+        <span className="unread-badge" aria-label={`${unreadCount} unread`}>
+          {unreadCount > 99 ? '99+' : unreadCount}
+        </span>
+      )}
       {showStop && (
         <button
           className="stop-btn"
@@ -88,6 +94,7 @@ function Drawer({
   setProjectFilter,
   onPick,
   onStop,
+  unread,
   onNew,
   onOpenSettings,
   onOpenUsage,
@@ -165,6 +172,7 @@ function Drawer({
               onTap={() => onPick(s)}
               onStop={onStop}
               onLongPress={onLongPress}
+              unread={unread ? unread[s.sessionId] : 0}
             />
           ))}
 
@@ -177,6 +185,7 @@ function Drawer({
                   active={s.sessionId === activeId}
                   onTap={() => onPick(s)}
                   onLongPress={onLongPress}
+                  unread={unread ? unread[s.sessionId] : 0}
                 />
               ))}
             </>

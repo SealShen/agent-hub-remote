@@ -1,6 +1,17 @@
+Option Explicit
+
+Dim shell, fso, root, wrapper, command
+
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
-scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
-wrapper = fso.BuildPath(scriptDir, "ahr_wrapper.ps1")
-cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File " & Chr(34) & wrapper & Chr(34)
-WScript.Quit shell.Run(cmd, 0, True)
+
+root = fso.GetParentFolderName(WScript.ScriptFullName)
+wrapper = fso.BuildPath(root, "ahr_wrapper.ps1")
+shell.CurrentDirectory = root
+
+command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " & Quote(wrapper)
+WScript.Quit shell.Run(command, 0, True)
+
+Function Quote(value)
+  Quote = Chr(34) & value & Chr(34)
+End Function

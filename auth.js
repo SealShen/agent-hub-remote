@@ -3,7 +3,7 @@
 // L2: owner cookie plus TOTP/Passkey step-up for risky actions.
 // Action tokens are one-use, action-scoped, and expire after 60 seconds.
 // Never log or persist TOTP_SECRET.
-import './env.js';
+import { parsePort } from './env.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -18,7 +18,9 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUDIT_PATH = path.join(__dirname, 'auth-audit.jsonl');
-const AUTH_STATE_DIR = path.join(__dirname, '.state', 'auth');
+const AUTH_STATE_DIR = process.env.AHR_AUTH_STATE_DIR
+  ? path.resolve(process.env.AHR_AUTH_STATE_DIR)
+  : path.join(__dirname, '.state', 'auth');
 const PASSKEYS_PATH = path.join(AUTH_STATE_DIR, 'passkeys.json');
 const ENROLL_FLAG_PATH = path.join(AUTH_STATE_DIR, 'enroll.flag');
 
@@ -28,7 +30,7 @@ const LOCK_THRESHOLD = 5;
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
 const PASSKEY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_PASSKEYS = 5;
-const HTTP_PORT = Math.max(1, Math.min(65535, parseInt(process.env.AHR_HTTP_PORT || process.env.AHR_PORT || process.env.AGENT_HUB_PORT || '3334', 10)));
+const HTTP_PORT = parsePort(process.env.AHR_HTTP_PORT || process.env.AHR_PORT || process.env.AGENT_HUB_PORT);
 const LOCAL_WEBAUTHN_ORIGIN = HTTP_PORT === 80 ? 'http://localhost' : `http://localhost:${HTTP_PORT}`;
 const WEBAUTHN_RP_ID = process.env.AHR_WEBAUTHN_RP_ID
   || (process.env.AHR_TAILNET_HOSTNAME && process.env.AHR_TAILNET_DOMAIN
@@ -40,13 +42,16 @@ const WEBAUTHN_ORIGIN = process.env.AHR_WEBAUTHN_ORIGIN
     : LOCAL_WEBAUTHN_ORIGIN);
 const WEBAUTHN_RP_NAME = 'Agent Hub Remote';
 const WEBAUTHN_USER_ID = Buffer.from('agent-hub-remote-owner', 'utf8');
+const STARTUP_BOOT_ID = crypto.randomBytes(16).toString('base64url');
+const STARTUP_COOKIE_NAME = 'ahr_startup';
+const STARTUP_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 try { fs.mkdirSync(AUTH_STATE_DIR, { recursive: true }); } catch {}
 
 // 危險動作白名單（spec §5.4）
-const ACTIONS = new Set(['restart', 'autoallow-on', 'create-with-autoallow']);
+const ACTIONS = new Set(['restart', 'autoallow-on', 'create-with-autoallow', 'startup', 'mint-local-token', 'review-flow']);
 // 不需要既有 sessionId 的動作（restart 全域；create-with-autoallow 在 session 建立前簽發）
-const SESSIONLESS_ACTIONS = new Set(['restart', 'create-with-autoallow']);
+const SESSIONLESS_ACTIONS = new Set(['restart', 'create-with-autoallow', 'startup', 'mint-local-token']);
 
 let TOTP_SECRET = process.env.TOTP_SECRET;
 
@@ -141,6 +146,222 @@ function parseActionToken(tok) {
   } catch {
     return null;
   }
+}
+
+function makeStartupVerificationToken() {
+  const payload = Buffer.from(JSON.stringify({
+    kind: 'startup',
+    bootId: STARTUP_BOOT_ID,
+    iat: Date.now(),
+    nonce: crypto.randomBytes(12).toString('base64url'),
+  })).toString('base64url');
+  return payload + '.' + sign(payload);
+}
+
+function parseStartupVerificationToken(tok) {
+  if (!tok || typeof tok !== 'string') return null;
+  const dot = tok.indexOf('.');
+  if (dot < 1) return null;
+  const payload = tok.slice(0, dot);
+  const mac = tok.slice(dot + 1);
+  const expect = sign(payload);
+  const a = Buffer.from(mac), b = Buffer.from(expect);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if (data.kind !== 'startup') return null;
+    if (data.bootId !== STARTUP_BOOT_ID) return null;
+    if (typeof data.nonce !== 'string' || !data.nonce) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function cookieValue(req, name) {
+  const raw = req.headers && req.headers.cookie;
+  if (!raw || typeof raw !== 'string') return null;
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+}
+
+function startupCookieHeader(token) {
+  const secure = WEBAUTHN_ORIGIN.startsWith('https://') ? '; Secure' : '';
+  return `${STARTUP_COOKIE_NAME}=${token}; Max-Age=${STARTUP_COOKIE_MAX_AGE_SECONDS}; Path=/; HttpOnly; SameSite=Strict${secure}`;
+}
+
+export function verifyStartupCookie(req) {
+  return !!parseStartupVerificationToken(cookieValue(req, STARTUP_COOKIE_NAME));
+}
+
+// ── 本機編排 token（localhost-only；passkey 升權後鑄出；重啟即作廢）─────────────
+// headless 的 localhost orchestrator 沒有瀏覽器 cookie，也做不了 passkey。改由 owner
+// 在瀏覽器做一次 passkey/TOTP step-up 鑄出此 token，寫入 .state/auth（gitignored），
+// 本機程序讀檔後以 X-AHR-Local-Token header 帶入。簽章用 STEP_UP_KEY（每次啟動隨機）
+// 並綁 STARTUP_BOOT_ID → 伺服器一重啟即自動失效，無需額外 TTL。
+const LOCAL_TOKEN_PATH = path.join(AUTH_STATE_DIR, 'local-token.json');
+const LOCAL_TOKEN_HEADER = 'x-ahr-local-token';
+const activeLocalNonces = new Set();   // 啟動為空 → 重啟即清；mint 覆寫、revoke 清空
+const localTokenWaiters = new Set();
+let localTokenIssuedAt = 0;
+
+// 重啟後 STEP_UP_KEY 與 bootId 都已改變，舊 token 必定無效；直接清掉落地檔，
+// 避免 headless orchestrator 誤用殘留值，也符合「重啟即清」語意。
+try { fs.rmSync(LOCAL_TOKEN_PATH, { force: true }); } catch {}
+
+function makeLocalToken() {
+  const nonce = crypto.randomBytes(18).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    kind: 'local',
+    bootId: STARTUP_BOOT_ID,
+    iat: Date.now(),
+    nonce,
+  })).toString('base64url');
+  return { token: payload + '.' + sign(payload), nonce };
+}
+
+function parseLocalToken(tok) {
+  if (!tok || typeof tok !== 'string') return null;
+  const dot = tok.indexOf('.');
+  if (dot < 1) return null;
+  const payload = tok.slice(0, dot);
+  const mac = tok.slice(dot + 1);
+  const expect = sign(payload);
+  const a = Buffer.from(mac), b = Buffer.from(expect);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if (data.kind !== 'local') return null;
+    if (data.bootId !== STARTUP_BOOT_ID) return null;
+    if (typeof data.nonce !== 'string' || !data.nonce) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredLocalToken() {
+  try {
+    const stored = JSON.parse(fs.readFileSync(LOCAL_TOKEN_PATH, 'utf8'));
+    return stored && typeof stored.token === 'string' ? stored.token : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasActiveLocalToken() {
+  const stored = readStoredLocalToken();
+  const data = parseLocalToken(stored);
+  return !!(data && activeLocalNonces.has(data.nonce));
+}
+
+function publicLocalTokenStatus() {
+  return {
+    ok: true,
+    active: hasActiveLocalToken(),
+    path: LOCAL_TOKEN_PATH,
+    bootId: STARTUP_BOOT_ID,
+    issuedAt: localTokenIssuedAt || null,
+  };
+}
+
+function resolveLocalTokenWaiters() {
+  const status = publicLocalTokenStatus();
+  for (const waiter of localTokenWaiters) waiter(status);
+  localTokenWaiters.clear();
+}
+
+// 僅接受真·loopback：tailnet 經 Tailscale Serve 也會 proxy 成 127.0.0.1，故比照
+// /usage/notify 額外擋掉任何 reverse-proxy 標頭，避免外洩 token 被 tailnet 端重放。
+function isTrueLoopback(req) {
+  const ip = req.socket && req.socket.remoteAddress;
+  if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return false;
+  const proxyHeaders = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto',
+                        'x-real-ip', 'forwarded', 'via', 'tailscale-funnel-request'];
+  if (proxyHeaders.some(h => req.headers[h])) return false;
+  return true;
+}
+
+// localhost orchestrator 認證：loopback + 有效 local token（簽章 + bootId + 仍在 active set）。
+export function verifyLocalToken(req) {
+  if (!isTrueLoopback(req)) return false;
+  const raw = req.headers && req.headers[LOCAL_TOKEN_HEADER];
+  const token = Array.isArray(raw) ? raw[0] : raw;
+  const data = parseLocalToken(token);
+  if (!data) return false;
+  if (!activeLocalNonces.has(data.nonce)) return false;
+  try {
+    const stored = JSON.parse(fs.readFileSync(LOCAL_TOKEN_PATH, 'utf8'));
+    if (!stored || stored.token !== token) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+export function isLocalLoopbackRequest(req) {
+  return isTrueLoopback(req);
+}
+
+export function waitForLocalToken(timeoutMs = 90_000, { afterIssuedAt = 0 } = {}) {
+  const current = publicLocalTokenStatus();
+  if (current.active && (current.issuedAt || 0) > afterIssuedAt) return Promise.resolve(current);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      localTokenWaiters.delete(finish);
+      resolve(status);
+    };
+    const timer = setTimeout(() => finish(publicLocalTokenStatus()), timeoutMs);
+    timer.unref?.();
+    localTokenWaiters.add(finish);
+  });
+}
+
+export function getLocalTokenStatus() {
+  return publicLocalTokenStatus();
+}
+
+// 鑄造：要求一次 passkey/TOTP step-up（action='mint-local-token'）。先寫檔成功才啟用，
+// 並覆寫舊 token（單一有效）。token 值只落地到 gitignored 檔，HTTP 回應不回傳值。
+export function handleLocalTokenMint(req, res) {
+  if (!verifyActionToken(req, res, { action: 'mint-local-token' })) return;
+  const { token, nonce } = makeLocalToken();
+  const issuedAt = Math.max(Date.now(), localTokenIssuedAt + 1);
+  try {
+    writeFileAtomic.sync(LOCAL_TOKEN_PATH, JSON.stringify({
+      token, bootId: STARTUP_BOOT_ID, iat: issuedAt,
+    }, null, 2));
+  } catch {
+    return res.status(500).json({ ok: false, error: 'failed to persist local token' });
+  }
+  activeLocalNonces.clear();
+  activeLocalNonces.add(nonce);
+  localTokenIssuedAt = issuedAt;
+  audit(req, true, 'local-token-mint', `boot=${STARTUP_BOOT_ID}`);
+  resolveLocalTokenWaiters();
+  return res.json({ ok: true, path: LOCAL_TOKEN_PATH, bootId: STARTUP_BOOT_ID });
+}
+
+export function handleLocalTokenStatus(req, res) {
+  return res.json(publicLocalTokenStatus());
+}
+
+// 撤銷：降權動作，無需 step-up（由 requireStartupVerified 保證呼叫者已驗身）。
+export function handleLocalTokenRevoke(req, res) {
+  activeLocalNonces.clear();
+  localTokenIssuedAt = 0;
+  try { fs.rmSync(LOCAL_TOKEN_PATH, { force: true }); } catch {}
+  audit(req, true, 'local-token-revoke', `boot=${STARTUP_BOOT_ID}`);
+  resolveLocalTokenWaiters();
+  return res.json({ ok: true, revoked: true });
 }
 
 // ── Nonce 重放防禦（記憶體 Map，10 分鐘輪詢 GC）─────────────────────────────
@@ -293,6 +514,35 @@ export function rejectFunnel(req, res, next) {
     return res.status(403).json({ error: 'funnel access disabled; serve only' });
   }
   next();
+}
+
+export function requireStartupVerified(req, res, next) {
+  if (verifyStartupCookie(req) || verifyLocalToken(req)) return next();
+  return res.status(403).json({
+    ok: false,
+    error: 'startup passkey verification required',
+    needStartupVerification: true,
+    action: 'startup',
+    bootId: STARTUP_BOOT_ID,
+  });
+}
+
+export function handleStartupStatus(req, res) {
+  return res.json({
+    ok: true,
+    verified: verifyStartupCookie(req),
+    passkeyRequired: true,
+    action: 'startup',
+    bootId: STARTUP_BOOT_ID,
+  });
+}
+
+export function handleStartupUnlock(req, res) {
+  if (!verifyActionToken(req, res, { action: 'startup' })) return;
+  const token = makeStartupVerificationToken();
+  res.setHeader('Set-Cookie', startupCookieHeader(token));
+  audit(req, true, 'startup-unlock', `boot=${STARTUP_BOOT_ID}`);
+  return res.json({ ok: true, verified: true, bootId: STARTUP_BOOT_ID });
 }
 
 // ── L2：Step-up endpoint（TOTP 路徑；PR1 唯一升權路徑）─────────────────────

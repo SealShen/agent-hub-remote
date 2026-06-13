@@ -8,6 +8,7 @@ const SLASH_COMMANDS = [
   { name: '/clear',   sub: 'fresh thread · keep session' },
   { name: '/compact', sub: 'summarize history to free context' },
   { name: '/rewind',  args: '[turn]', sub: 'discard from a user turn onward' },
+  { name: '/review-flow', args: '[pr]', sub: 'guarded review flow' },
   { name: '/model',   args: '<name>', sub: 'switch model' },
   { name: '/cd',      args: '<path>', sub: 'change working dir' },
   { name: '/cost',    sub: 'token usage + spend' },

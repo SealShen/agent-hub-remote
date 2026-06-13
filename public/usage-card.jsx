@@ -112,8 +112,12 @@ function Usage({ onClose }) {
                    sub={_countdown(q.session_reset_ms)} />
               <Bar label="Weekly（7d）" pct={q.weekly_pct}
                    sub={_countdown(q.weekly_reset_ms)} />
+              {(q.session_expired || q.weekly_expired) && <div style={{ fontSize: 11, color: 'var(--st-interrupted)' }}>
+                ⚠ {[q.session_expired && '5h', q.weekly_expired && '7d'].filter(Boolean).join(' / ')} 視窗已重置，等下一筆讀數</div>}
               {q.stale && <div style={{ fontSize: 11, color: 'var(--st-interrupted)' }}>
-                ⚠ 配額快照偏舊（Claude Code 狀態列已超過 1h 未刷新）</div>}
+                ⚠ 配額快照偏舊（{q.source === 'api'
+                  ? 'API 配額快照已超過 5 分鐘未更新'
+                  : 'Claude Code 狀態列已超過 1h 未刷新'}）</div>}
             </>
           ) : (
             <div style={{ fontSize: 12, color: 'var(--fg-mute)', lineHeight: 1.6 }}>

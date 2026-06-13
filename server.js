@@ -2,7 +2,7 @@
 // Bind loopback and expose it through Tailscale Serve inside a private tailnet.
 // Implements the structured route protocol used by the browser UI.
 
-import './env.js';
+import { parsePort } from './env.js';
 import express from 'express';
 import http from 'http';
 import { spawn } from 'child_process';
@@ -17,6 +17,10 @@ import {
   assertSecret, rejectFunnel, handleStepUpTotp, verifyActionToken, audit,
   handlePasskeyStatus, handleEnrollPasskeyStart, handleEnrollPasskeyFinish,
   handleStepUpPasskeyStart, handleStepUpPasskeyFinish,
+  handleStartupStatus, handleStartupUnlock, requireStartupVerified,
+  verifyStartupCookie,
+  verifyLocalToken, handleLocalTokenMint, handleLocalTokenStatus, handleLocalTokenRevoke,
+  isLocalLoopbackRequest, getLocalTokenStatus, waitForLocalToken,
 } from './auth.js';
 import {
   sessions, hydrate, createSession, sessionsArr, loadMessages,
@@ -41,7 +45,7 @@ assertSecret();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
-const PORT = Math.max(1, Math.min(65535, parseInt(process.env.AHR_HTTP_PORT || process.env.AHR_PORT || process.env.AGENT_HUB_PORT || '3334', 10)));
+const PORT = parsePort(process.env.AHR_HTTP_PORT || process.env.AHR_PORT || process.env.AGENT_HUB_PORT);
 const BIND_HOST = process.env.AHR_BIND_HOST || '127.0.0.1';
 
 // ── 多目錄登錄表（plan §二-C）：dirs.json > ALLOWED_DIRS env > 預設 ──────────
@@ -69,6 +73,17 @@ function loadDirs() {
 }
 const DIRS = loadDirs();
 const DIR_BY_ALIAS = new Map(DIRS.map(d => [d.alias, d]));
+const CLAUDE_MODELS = new Set(['sonnet', 'opus', 'haiku']);
+const CODEX_UNSUPPORTED_MODELS = new Set(['gpt-5-codex']);
+
+function codexModelArg(model) {
+  const raw = model && model !== 'default' ? String(model) : null;
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (CLAUDE_MODELS.has(lower) || /^claude-/i.test(raw)) return null;
+  if (CODEX_UNSUPPORTED_MODELS.has(lower)) return null;
+  return raw;
+}
 
 function resolveCwd(alias) {
   const d = DIR_BY_ALIAS.get(alias);
@@ -88,6 +103,11 @@ function codexWriteGuard(agentType, cwd, autoAllow) {
   if (agentType !== 'codex' || !autoAllow) return null;
   // Linked worktree remains advisory metadata; step-up gates autoAllow.
   return null;
+}
+
+function allowAutoModeAction(req, res, action, sessionId) {
+  if (verifyLocalToken(req)) return true;
+  return verifyActionToken(req, res, { action, sessionId });
 }
 
 // ── File upload temp storage. Files are deleted after AHR_UPLOAD_TTL_MS. ──
@@ -215,31 +235,139 @@ function runClaudeSummary(transcript, cwd, model) {
 
     let output = '';
     let stderr = '';
-    const timer = setTimeout(() => { try { proc.kill(); } catch {} }, 10_000);
-    proc.stdout.on('data', chunk => { output += chunk.toString('utf8'); });
-    proc.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-1000); });
-    proc.on('error', () => { clearTimeout(timer); resolve(null); });
-    proc.on('close', code => {
+    let settled = false;
+    // resolve exactly once; clear the timer and clean up the temp session on every path.
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       cleanupClaudePrintSession(tempSessionId);
-      if (code === 0 && output.trim()) return resolve(output.trim());
-      console.error('[agent-hub-remote] compact summary failed', code, stderr);
-      resolve(null);
+      resolve(value);
+    };
+    // shell:true spawns claude under a shell; proc.kill() only signals the shell, so on
+    // Windows the claude child tree survives. Use killTree() (taskkill /T) like the other
+    // AHR shutdown paths to bound the whole tree on timeout.
+    const timer = setTimeout(() => {
+      console.error('[agent-hub-remote] compact summary timed out, killing process tree');
+      try { killTree(proc); } catch {}
+      finish(null);
+    }, 10_000);
+    proc.stdout.on('data', chunk => { output += chunk.toString('utf8'); });
+    proc.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-1000); });
+    proc.on('error', () => finish(null));
+    proc.on('close', code => {
+      if (code === 0 && output.trim()) return finish(output.trim());
+      if (!settled) console.error('[agent-hub-remote] compact summary failed', code, stderr);
+      finish(null);
     });
     proc.stdin.write(compactPrompt(transcript), 'utf8');
     proc.stdin.end();
   });
 }
 
+function codexSummaryText(ev) {
+  if (!ev || typeof ev !== 'object') return '';
+  if (ev.type === 'item.completed' && ev.item && ev.item.type === 'agent_message') {
+    return String(ev.item.text || '').trim();
+  }
+  if (ev.type === 'agent_message') return String(ev.text || '').trim();
+  if (ev.type === 'turn.completed' && typeof ev.output === 'string') return ev.output.trim();
+  return '';
+}
+
+function runCodexSummary(transcript, cwd, model) {
+  return new Promise((resolve) => {
+    const args = ['exec', '-s', 'read-only', '--json', '--skip-git-repo-check'];
+    const modelArg = codexModelArg(model);
+    if (modelArg) args.push('-m', modelArg);
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+
+    let proc;
+    try {
+      proc = spawn('codex', args, {
+        cwd,
+        windowsHide: true,
+        shell: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+      });
+    } catch {
+      return resolve(null);
+    }
+
+    let buf = '';
+    let output = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value && value.trim() ? value.trim() : null);
+    };
+    const timer = setTimeout(() => {
+      console.error('[agent-hub-remote] codex compact summary timed out, killing process tree');
+      try { killTree(proc); } catch {}
+      finish(null);
+    }, 45_000);
+
+    proc.stdout.on('data', chunk => {
+      buf += chunk.toString('utf8');
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const text = codexSummaryText(JSON.parse(line));
+          if (text) output += (output ? '\n' : '') + text;
+        } catch {
+          output += (output ? '\n' : '') + line.trim();
+        }
+      }
+    });
+    proc.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-1000); });
+    proc.on('error', () => finish(null));
+    proc.on('close', code => {
+      if (buf.trim()) {
+        try {
+          const text = codexSummaryText(JSON.parse(buf));
+          if (text) output += (output ? '\n' : '') + text;
+        } catch {
+          output += (output ? '\n' : '') + buf.trim();
+        }
+      }
+      if (code === 0 && output.trim()) return finish(output.trim());
+      if (!settled) console.error('[agent-hub-remote] codex compact summary failed', code, stderr);
+      finish(null);
+    });
+    proc.stdin.write(compactPrompt(transcript), 'utf8');
+    proc.stdin.end();
+  });
+}
+
+async function summarizeForSession(transcript, s) {
+  if (s.agentType === 'codex') {
+    const codexSummary = await runCodexSummary(transcript, s.cwd, s.model);
+    if (codexSummary) return codexSummary;
+    const localSummary = await summarize(compactPrompt(transcript));
+    if (localSummary) return localSummary;
+    return null;
+  }
+
+  const claudeSummary = await runClaudeSummary(transcript, s.cwd, s.model);
+  if (claudeSummary) return claudeSummary;
+  const localSummary = await summarize(compactPrompt(transcript));
+  if (localSummary) return localSummary;
+  return null;
+}
+
 async function contextForMessages(messages, s) {
   const transcript = conversationText(messages);
   if (!transcript) return { context: '', mode: 'cleared' };
   if (transcript.length <= REWIND_INLINE_LIMIT) return { context: transcript, mode: 'transcript' };
-  const summary = await runClaudeSummary(transcript, s.cwd, s.model);
+  const summary = await summarizeForSession(transcript, s);
   if (summary) return { context: summary, mode: 'summary' };
-
-  const localSummary = await summarize(compactPrompt(transcript));
-  if (localSummary) return { context: localSummary, mode: 'summary' };
 
   const fallback = rewindTranscriptFallback(transcript);
   console.error(
@@ -261,8 +389,27 @@ function actionPayload(s) {
   };
 }
 
-function applyContextReset(s, pending) {
-  s.pendingContext = pending;
+function engineRefsSnapshot(s) {
+  return {
+    claude: s.engineRefs?.claude || null,
+    codex: s.engineRefs?.codex || null,
+  };
+}
+
+function contextResetMeta(s, { op, turn } = {}) {
+  return {
+    op: op || 'reset',
+    turn: turn ?? null,
+    ts: Date.now(),
+    agentType: s.agentType === 'codex' ? 'codex' : 'claude',
+    lastEngine: s.lastEngine || null,
+    previousEngineRefs: engineRefsSnapshot(s),
+  };
+}
+
+function applyContextReset(s, pending, resetMeta) {
+  s.pendingContext = { ...pending, contextReset: resetMeta || pending.contextReset || null, freshThread: true };
+  s.contextReset = resetMeta || null;
   s.engineRefs = { claude: null, codex: null };
   s.lastEngine = null;
   s.pid = null;
@@ -331,10 +478,17 @@ app.use(express.json({ limit: '12mb' }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+let pendingLocalTokenRequest = null;
+let pendingLocalOrchestrateApproval = null;
 
 server.on('upgrade', (req, socket, head) => {
   // Funnel ingress carries this header; reject websocket upgrades too.
   if (req.headers['tailscale-funnel-request']) { socket.destroy(); return; }
+  if (!verifyStartupCookie(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
 
@@ -343,6 +497,18 @@ function broadcast(obj) {
   for (const ws of wss.clients) {
     if (ws.readyState === 1) ws.send(data);
   }
+}
+
+function setPendingLocalTokenRequest(reason) {
+  pendingLocalTokenRequest = {
+    reason,
+    requestedAt: Date.now(),
+  };
+  broadcast({ type: 'local_token_request', ...pendingLocalTokenRequest });
+}
+
+function getPendingLocalTokenRequest() {
+  return pendingLocalTokenRequest;
 }
 
 wss.on('connection', (ws, req) => {
@@ -426,6 +592,65 @@ app.post('/enroll/passkey/start', handleEnrollPasskeyStart);
 app.post('/enroll/passkey/finish', handleEnrollPasskeyFinish);
 app.post('/step-up/passkey/start', handleStepUpPasskeyStart);
 app.post('/step-up/passkey/finish', handleStepUpPasskeyFinish);
+app.get('/startup/status', handleStartupStatus);
+app.post('/startup/unlock', handleStartupUnlock);
+// 鑄造本機編排 token：pre-gate（與 unlock/step-up 同層，passkey action-token 即唯一閘），
+// 讓 owner 重啟後一次 passkey 即可授權本機 orchestrator，毋須先取得 startup cookie。
+app.post('/local-token/mint', handleLocalTokenMint);
+app.post('/local-token/request', async (req, res) => {
+  if (!isLocalLoopbackRequest(req)) return res.status(403).json({ error: 'local only' });
+  const reason = req.body && req.body.reason ? String(req.body.reason).slice(0, 160) : 'local orchestration';
+  const status = getLocalTokenStatus();
+  if (status.active) return res.json({ ok: true, active: true, path: status.path, bootId: status.bootId });
+  setPendingLocalTokenRequest(reason);
+  return res.status(202).json({ ok: true, pending: true, path: status.path, bootId: status.bootId });
+});
+
+app.post('/local-orchestrate/session/:id/send', async (req, res) => {
+  if (!isLocalLoopbackRequest(req)) return res.status(403).json({ error: 'local only' });
+  if (pendingLocalOrchestrateApproval) {
+    return res.status(409).json({ error: 'another local handoff is pending approval' });
+  }
+
+  const previousStatus = getLocalTokenStatus();
+  const approvalId = crypto.randomBytes(12).toString('base64url');
+  pendingLocalOrchestrateApproval = {
+    id: approvalId,
+    sessionId: req.params.id,
+    requestedAt: Date.now(),
+  };
+
+  try {
+    const reason = req.body && req.body.reason
+      ? String(req.body.reason).slice(0, 160)
+      : `send handoff to ${req.params.id}`;
+    setPendingLocalTokenRequest(reason);
+    const requestedWait = Number(req.body && req.body.waitMs);
+    const waitMs = Number.isFinite(requestedWait)
+      ? Math.max(0, Math.min(requestedWait, 120_000))
+      : 90_000;
+    const previousIssuedAt = previousStatus.issuedAt || 0;
+    const status = await waitForLocalToken(waitMs, { afterIssuedAt: previousIssuedAt });
+
+    const freshApproval = status.active && (status.issuedAt || 0) > previousIssuedAt;
+    if (!freshApproval || !pendingLocalOrchestrateApproval || pendingLocalOrchestrateApproval.id !== approvalId) {
+      return res.status(403).json({
+        ok: false,
+        error: 'local orchestration authorization required',
+        needLocalAuthorization: true,
+        pending: true,
+        path: status.path,
+        bootId: status.bootId,
+      });
+    }
+
+    return handleSessionSend(req, res);
+  } finally {
+    if (pendingLocalOrchestrateApproval && pendingLocalOrchestrateApproval.id === approvalId) {
+      pendingLocalOrchestrateApproval = null;
+    }
+  }
+});
 
 // Stop hook 呼叫：觸發所有已連線瀏覽器立即刷新用量卡（無需 session）。
 // 防護：loopback IP + 拒任何 reverse-proxy 標頭（Tailscale Funnel 會 proxy
@@ -455,7 +680,34 @@ app.post('/usage/notify', (req, res) => {
   res.json({ ok: true, ...result, ingested: ingestResult ? ingestResult.added : 0 });
 });
 
+function startupGateBypass(req) {
+  const p = req.path || '/';
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    if (p === '/' || p === '/index.html') return true;
+    if (path.extname(p)) return true;
+  }
+  return false;
+}
+
+app.use((req, res, next) => {
+  if (startupGateBypass(req)) return next();
+  return requireStartupVerified(req, res, next);
+});
+
 // 以下路由 L1（Tailscale Serve）已驗身份；危險動作另靠 action-token 升權。
+
+// 撤銷本機編排 token：post-gate（降權動作，要求呼叫者已驗身—cookie 或本機 token—
+// 以免 tailnet 匿名端 DoS 掉本機授權）。
+app.get('/local-token/status', handleLocalTokenStatus);
+app.get('/local-token/request/pending', (req, res) => {
+  const pending = getPendingLocalTokenRequest();
+  res.json({ ok: true, pending: !!pending, ...(pending || {}) });
+});
+app.post('/local-token/request/clear', (req, res) => {
+  pendingLocalTokenRequest = null;
+  res.json({ ok: true });
+});
+app.post('/local-token/revoke', handleLocalTokenRevoke);
 
 // ── 協定 §F ────────────────────────────────────────────────────────────────
 app.get('/dirs', (req, res) => {
@@ -535,7 +787,7 @@ app.post('/sessions', (req, res) => {
   if (!cwd) return res.status(400).json({ error: `未知專案 alias: ${alias}` });
   const at = agentType === 'codex' ? 'codex' : 'claude';
 
-  if (autoAllow && !verifyActionToken(req, res, { action: 'create-with-autoallow' })) return;
+  if (autoAllow && !allowAutoModeAction(req, res, 'create-with-autoallow')) return;
   const writeGuard = codexWriteGuard(at, cwd, !!autoAllow);
   if (writeGuard) {
     return res.status(409).json({ error: writeGuard, needWorktree: true });
@@ -618,16 +870,18 @@ app.post('/session/:id/compact', async (req, res) => {
   if (convo.length < 2) return res.status(400).json({ error: 'not enough conversation to compact' });
 
   const transcript = conversationText(convo);
-  const summary = await runClaudeSummary(transcript, s.cwd, s.model);
+  const summary = await summarizeForSession(transcript, s);
   if (!summary) return res.status(500).json({ error: 'compact summary failed' });
 
+  const resetMeta = contextResetMeta(s, { op: 'compact' });
   appendContextControl(s, {
     op: 'compact',
     context: summary,
     contextMode: 'summary',
+    contextReset: resetMeta,
     text: 'Session compacted. The next turn will start a new engine thread from this summary.',
   });
-  applyContextReset(s, { text: summary, mode: 'compact', op: 'compact', resetOnly: false });
+  applyContextReset(s, { text: summary, mode: 'compact', op: 'compact', resetOnly: false }, resetMeta);
   broadcast({ type: 'sessions', data: sessionsArr() });
   broadcast({ type: 'thread_reload', id: s.id });
   res.json(actionPayload(s));
@@ -666,11 +920,13 @@ app.post('/session/:id/rewind', async (req, res) => {
 
   const keptTurns = turn - 1;
   const modeText = ctx.mode === 'summary' ? 'summary' : (ctx.mode === 'transcript' ? 'transcript' : 'empty context');
+  const resetMeta = contextResetMeta(s, { op: 'rewind', turn });
   appendContextControl(s, {
     op: 'rewind',
     turn,
     context: ctx.context,
     contextMode: ctx.mode,
+    contextReset: resetMeta,
     text: keptTurns
       ? `Rewound before turn #${turn}. Kept turns #1-#${keptTurns} as ${modeText}; the next turn starts a new engine thread.`
       : `Rewound to the beginning before turn #${turn}. The next turn starts a new engine thread with no prior context.`,
@@ -680,13 +936,13 @@ app.post('/session/:id/rewind', async (req, res) => {
     mode: ctx.mode,
     op: 'rewind',
     resetOnly: !ctx.context,
-  });
+  }, resetMeta);
   broadcast({ type: 'sessions', data: sessionsArr() });
   broadcast({ type: 'thread_reload', id: s.id });
   res.json(actionPayload(s));
 });
 
-app.post('/session/:id/send', (req, res) => {
+function handleSessionSend(req, res) {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (s.proc) return res.status(409).json({ error: '此 session 仍在執行中' });
@@ -751,7 +1007,9 @@ app.post('/session/:id/send', (req, res) => {
     .catch(e => console.error('[agent-hub-remote] runEngine 失敗', e));
 
   res.json({ ok: true });
-});
+}
+
+app.post('/session/:id/send', handleSessionSend);
 
 app.post('/session/:id/cancel', (req, res) => {
   const s = sessions.get(req.params.id);
@@ -775,12 +1033,13 @@ app.post('/session/:id/rename', (req, res) => {
   res.json({ ok: true });
 });
 
-// 切某 session autoAllow（spec §5.4：開啟需 action-token；關閉直接放行）
+// 切某 session autoAllow（spec §5.4：開啟需 action-token；本機編排 token 可代替；
+// 關閉直接放行）
 app.post('/session/:id/autoallow', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const on = !!(req.body && req.body.on);
-  if (on && !verifyActionToken(req, res, { action: 'autoallow-on', sessionId: s.id })) return;
+  if (on && !allowAutoModeAction(req, res, 'autoallow-on', s.id)) return;
   const writeGuard = codexWriteGuard(s.agentType, s.cwd, on);
   if (writeGuard) {
     return res.status(409).json({ error: writeGuard, needWorktree: true });
@@ -794,7 +1053,13 @@ app.post('/session/:id/autoallow', (req, res) => {
 
 // 前端（Claude Design 產出後置於 ./public/index.html）。尚未交接時給佔位頁。
 const PUBLIC_DIR = path.join(__dirname, 'public');
-app.use(express.static(PUBLIC_DIR));
+app.use(express.static(PUBLIC_DIR, {
+  setHeaders(res, filePath) {
+    if (/\.(?:html|css|js|jsx)$/.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
 app.get('/', (req, res) => {
   const idx = path.join(PUBLIC_DIR, 'index.html');
   if (fs.existsSync(idx)) return res.sendFile(idx);

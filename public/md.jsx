@@ -150,6 +150,15 @@ function CopyBtn({ text }) {
   );
 }
 
+function codeFenceClass(lang) {
+  const token = String(lang || '').trim().split(/\s+/)[0] || '';
+  const safe = token
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return 'md-pre' + (safe ? ` lang-${safe}` : '');
+}
+
 function MD({ text }) {
   const blocks = React.useMemo(() => mdBlocks(text), [text]);
   return (
@@ -157,7 +166,7 @@ function MD({ text }) {
       {blocks.map((b, idx) => {
         if (b.kind === 'code') {
           return (
-            <div className="md-pre" key={idx}>
+            <div className={codeFenceClass(b.lang)} key={idx}>
               <div className="pre-head">
                 <span>{b.lang || ''}</span>
                 <CopyBtn text={b.text} />

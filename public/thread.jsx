@@ -9,6 +9,10 @@ function Eng({ engine }) {
   return <span className={`eng ${code}`}>{code}</span>;
 }
 
+function codeWindowText(lang, text) {
+  return '```' + (lang || 'text') + '\n' + String(text || '') + '\n```';
+}
+
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return '';
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -34,6 +38,13 @@ function Msg({ m, accent }) {
       return (
         <div className={`sys ${kind}`}>
           <MDComp text={m.text}/>
+        </div>
+      );
+    }
+    if (kind === 'restart' && MDComp) {
+      return (
+        <div className={`sys ${kind} code-window`}>
+          <MDComp text={codeWindowText('status', m.text)}/>
         </div>
       );
     }
@@ -182,9 +193,10 @@ function Composer({ session, value, setValue, onSend, onStop, onQueue, onSlashPi
 }
 
 // ── Thread main ─────────────────────────────────────────────
-function Thread({ session, messages, queue, onOpenDrawer, onOpenOptions, onToggleAuto, value, setValue, onSend, onStop, onQueue, onSlashPick, wsState, files, onAddFile, onRemoveFile, onRestartServer }) {
+function Thread({ session, messages, queue, onOpenDrawer, onOpenOptions, onToggleAuto, value, setValue, onSend, onStop, onQueue, onSlashPick, wsState, files, onAddFile, onRemoveFile, onRestartServer, hasUnread }) {
   const scrollRef = useRef(null);
   const accent = window.ACCENTS[session.accent || 0];
+  const MDComp = window.MD;
   const [autoSubmitting, setAutoSubmitting] = useState(false);
 
   useEffect(() => {
@@ -214,8 +226,9 @@ function Thread({ session, messages, queue, onOpenDrawer, onOpenOptions, onToggl
     <div className="app" style={{ '--accent': accent }}>
       {/* nav row */}
       <div className="nav">
-        <button className="nav-btn" onClick={onOpenDrawer} aria-label="menu">
+        <button className="nav-btn" onClick={onOpenDrawer} aria-label={hasUnread ? 'menu, unread messages' : 'menu'}>
           <span className="ic-menu"/>
+          {hasUnread && <span className="nav-unread-dot"/>}
         </button>
         <div className="title-zone">
           <span className={`dot ${session.status}`}/>
@@ -280,7 +293,7 @@ function Thread({ session, messages, queue, onOpenDrawer, onOpenOptions, onToggl
       )}
       {session.status === 'interrupted' && (
         <div className="banner resume">
-          ↻ 已重啟 · 送出下一則訊息將以 --resume 接回
+          {MDComp ? <MDComp text={codeWindowText('status', '↻ 已重啟 · 送出下一則訊息將以 --resume 接回')}/> : '↻ 已重啟 · 送出下一則訊息將以 --resume 接回'}
         </div>
       )}
 

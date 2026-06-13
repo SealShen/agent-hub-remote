@@ -54,6 +54,7 @@ function metaOf(s) {
     msgCount: s.msgCount || 0,
     source: s.source || null,
     nativePath: s.nativePath || null,
+    contextReset: s.contextReset || null,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
   };
@@ -90,6 +91,46 @@ export function appendMsg(s, entry) {
   return entry.ts;
 }
 
+export function removeSession(id, { deleteLog = false } = {}) {
+  const existed = sessions.delete(id);
+  if (deleteLog) {
+    try { fs.rmSync(jsonlPath(id), { force: true }); }
+    catch (e) { console.error('[store] session jsonl delete failed:', e.message); }
+  }
+  if (existed) {
+    applyRetention();
+    persistIndex();
+  }
+  return existed;
+}
+
+// Number of hub-appended JSONL entries for a session (excludes native transcript).
+export function hubMessageCount(id) {
+  return readHubJsonl(id).length;
+}
+
+// Move any hub-appended messages from `fromId`'s JSONL into `owner` before the source
+// session is discarded, so claiming a native twin never silently drops hub-side messages
+// (usage notes, context controls, etc.) that were appended to the twin. Returns the count
+// moved. The native transcript file (nativePath) is untouched — only the hub JSONL moves.
+export function absorbHubMessages(fromId, owner) {
+  if (!owner || fromId === owner.id) return 0;
+  const entries = readHubJsonl(fromId);
+  if (!entries.length) return 0;
+  // appendMsg sets owner.updatedAt = entry.ts on every call, so moving older twin
+  // messages would drag updatedAt backwards (and reorder the session list). Pin it to
+  // the newest of {prior owner.updatedAt, moved timestamps} after the merge. msgCount is
+  // already kept accurate by appendMsg's per-entry increment.
+  let maxTs = owner.updatedAt || 0;
+  for (const entry of entries) {
+    appendMsg(owner, entry);
+    if (typeof entry.ts === 'number' && entry.ts > maxTs) maxTs = entry.ts;
+  }
+  owner.updatedAt = maxTs;
+  persistIndex();
+  return entries.length;
+}
+
 function readHubJsonl(id) {
   let lines;
   try {
@@ -108,6 +149,14 @@ function isContextControl(m) {
   return m && m.role === 'system' && m.kind === CONTEXT_CONTROL_KIND;
 }
 
+function latestContextReset(id) {
+  let reset = null;
+  for (const m of readHubJsonl(id)) {
+    if (isContextControl(m) && m.contextReset) reset = m.contextReset;
+  }
+  return reset;
+}
+
 function publicControlMessage(m) {
   const out = {
     role: 'system',
@@ -117,6 +166,7 @@ function publicControlMessage(m) {
   };
   if (m.context) out.context = m.context;
   if (m.contextMode) out.contextMode = m.contextMode;
+  if (m.contextReset) out.contextReset = m.contextReset;
   if (m.op) out.op = m.op;
   if (m.turn != null) out.turn = m.turn;
   return out;
@@ -175,16 +225,19 @@ export function loadMessages(id, tail) {
   return out;
 }
 
-export function appendContextControl(s, { op, turn, context, contextMode, text }) {
-  return appendMsg(s, {
+export function appendContextControl(s, { op, turn, context, contextMode, text, contextReset }) {
+  const ts = appendMsg(s, {
     role: 'system',
     kind: CONTEXT_CONTROL_KIND,
     op,
     turn,
     context: context || '',
     contextMode: contextMode || null,
+    contextReset: contextReset || null,
     text,
   });
+  if (contextReset) s.contextReset = contextReset;
+  return ts;
 }
 
 export function syncMessageCount(s) {
@@ -207,6 +260,8 @@ export function pendingContextFromControls(s) {
         mode: m.contextMode || m.op || 'reset',
         op: m.op || 'reset',
         resetOnly: !m.context,
+        freshThread: true,
+        contextReset: m.contextReset || null,
         ts: m.ts || null,
       };
     } else if (pending && m.role === 'user' && m.text && String(m.text).trim()) {
@@ -247,6 +302,7 @@ export function hydrate() {
     if (wasActive && meta.pid) orphans.push({ id: meta.id, pid: meta.pid });
 
     const rec = blankRecord(meta);
+    rec.contextReset = meta.contextReset || latestContextReset(meta.id) || null;
     rec.pid = null;
     if (wasActive) {
       rec.status = 'interrupted';

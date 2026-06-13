@@ -23,7 +23,8 @@ const CREDENTIALS_FILE = path.join(HOME, '.claude', '.credentials.json');
 const API_CACHE_FILE = path.join(HOME, '.claude', 'usage-api-cache.json');
 const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage';
 const API_POLL_MS = 60_000;
-const API_CACHE_TTL_MS = 5 * 60_000;
+const API_CACHE_TTL_MS = 5 * 60_000;          // 視為「新鮮」的門檻（僅標記 stale 用）
+const API_CACHE_MAX_AGE_MS = 24 * 3600_000;   // 超過此值才真的放棄 API、退回 statusLine
 
 // 訂閱用戶用不到精確金額，僅沿用 usage-tracker 的估算費率（USD / 1M tokens）
 const RATES = { input: 3.0, cache_creation: 3.75, cache_read: 0.3, output: 15.0 };
@@ -147,21 +148,36 @@ function readClaudeQuotaFromApiCache() {
   const j = _apiCacheMem || loadApiCacheFromDisk();
   if (!j || !j.captured_at || !j.data) return null;
   const ageMs = Date.now() - j.captured_at;
-  if (ageMs > API_CACHE_TTL_MS) return null;
+  // 只有「極舊」(>24h，等於 poller 長期掛掉) 才放棄 API；否則一筆數分鐘前的真實配額
+  // 仍遠比 statusLine 的落後快照 (常顯示 0) 準確，不再因 5min TTL 退回爛來源。
+  if (ageMs > API_CACHE_MAX_AGE_MS) return null;
   const d = j.data || {};
   const f5 = d.five_hour || {};
   const f7 = d.seven_day || {};
   const s5 = normPct(f5.utilization);
   const wk = normPct(f7.utilization);
   if (s5 == null && wk == null) return null;
+  const fresh = ageMs <= API_CACHE_TTL_MS;
+  const reset5 = toMs(f5.resets_at);
+  const reset7 = toMs(f7.resets_at);
+  const now = Date.now();
+  // 配額視窗會週期歸零（5h / 7d）。cache 不再 fresh 且該 window 的 resets_at 已過 →
+  // 舊讀數屬於「上一個已結束的視窗」，不能再當「目前」呈現（否則 UI 會把上一輪跑掉的 %
+  // 當成這一輪在用）。此時把該 bucket 的 pct 設 null 並標記 expired，讓 UI 誠實顯示「待新讀數」。
+  const sessionExpired = !fresh && reset5 != null && reset5 <= now;
+  const weeklyExpired = !fresh && reset7 != null && reset7 <= now;
+  const session_pct = sessionExpired ? null : s5;
+  const weekly_pct = weeklyExpired ? null : wk;
   return {
-    available: true,
-    session_pct: s5,
-    weekly_pct: wk,
-    session_reset_ms: toMs(f5.resets_at),
-    weekly_reset_ms: toMs(f7.resets_at),
+    available: session_pct != null || weekly_pct != null,
+    session_pct,
+    weekly_pct,
+    session_reset_ms: reset5,
+    weekly_reset_ms: reset7,
+    session_expired: sessionExpired,
+    weekly_expired: weeklyExpired,
     captured_at: j.captured_at,
-    stale: false,
+    stale: !fresh,   // 仍用 TTL 標記新鮮度，但不再因此丟棄整筆
     source: 'api',
   };
 }

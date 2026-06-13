@@ -2,6 +2,7 @@
 // Per-session controls: engine swap · model · flags · rename · archive · delete · meta.
 
 const { useState: useStateO } = React;
+const CLAUDE_MODEL_ORDER = window.AHR_CLAUDE_MODEL_ORDER || ['sonnet', 'opus', 'haiku'];
 
 function OptRow({ label, sub, right, onClick, danger, warn }) {
   const cls = `row ${danger ? 'danger' : ''} ${warn ? 'warn' : ''}`;
@@ -18,17 +19,35 @@ function OptRow({ label, sub, right, onClick, danger, warn }) {
   );
 }
 
+function shortId(id) {
+  if (!id) return '-';
+  const s = String(id);
+  return s.length > 30 ? s.slice(0, 30) + '...' : s;
+}
+
+function MetaId({ k, v }) {
+  if (!v) return null;
+  return <div><span className="k">{k}</span>{' '}<span className="v">{shortId(v)}</span></div>;
+}
+
 function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
                    onToggleElevated, onRename, onArchive, onDelete }) {
   const [confirm, setConfirm] = useStateO(null); // null | 'archive' | 'delete'
   const accent = window.ACCENTS[session.accent || 0];
   const selectedModel = session.agentType === 'codex'
     ? 'default'
-    : (session.model || 'sonnet');
+    : (session.model || CLAUDE_MODEL_ORDER[0]);
 
   const modelList = session.agentType === 'claude'
-    ? ['sonnet', 'opus', 'haiku']
+    ? CLAUDE_MODEL_ORDER
     : ['default'];   // codex：用帳號預設 model（ChatGPT 帳號不支援 gpt-5-codex 寫死 id）
+  const refs = session._engineRefs || {};
+  const resetRefs = session._contextReset && session._contextReset.previousEngineRefs
+    ? session._contextReset.previousEngineRefs
+    : {};
+  const resetLabel = session._contextReset
+    ? `${session._contextReset.op || 'reset'} previous`
+    : '';
 
   return (
     <>
@@ -105,7 +124,12 @@ function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
             <div className="sec-h" style={{ padding: '14px 14px 8px' }}>metadata</div>
             <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4, paddingTop: 8, paddingBottom: 10 }}>
               <div className="su-meta" style={{ width: '100%' }}>
-                <div><span className="k">id</span>{' '}<span className="v">{session.sessionId.slice(0, 26)}…</span></div>
+                <div><span className="k">hub id</span>{' '}<span className="v">{shortId(session.sessionId)}</span></div>
+                <MetaId k="claude id" v={refs.claude}/>
+                <MetaId k="codex id" v={refs.codex}/>
+                {resetLabel ? <div><span className="k">{resetLabel}</span></div> : null}
+                <MetaId k="old claude" v={resetRefs.claude}/>
+                <MetaId k="old codex" v={resetRefs.codex}/>
                 <div><span className="k">cwd</span>{' '}<span className="v">{session.cwd}</span></div>
                 <div><span className="k">msgs</span>{' '}<span className="v">{session.msgCount}</span></div>
               </div>

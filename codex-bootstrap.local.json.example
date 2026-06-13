@@ -1,0 +1,5 @@
+{
+  "_comment": "Optional. Copy to codex-bootstrap.local.json (gitignored) to inject a workspace-specific bootstrap ahead of the first codex prompt. Use an array for multiple workspaces. Override the path with AHR_CODEX_BOOTSTRAP_CONFIG. `workspaceRoot` supports a leading ~ for the home dir. `bootstrap` should end with a `\\n---` separator so the ingest layer can strip it back off the stored user message.",
+  "workspaceRoot": "~/projects/my-workspace",
+  "bootstrap": "# Codex workspace bootstrap\n\nBefore non-trivial work in this workspace, read these files in order:\n\n1. `docs/ARCHITECTURE.md`\n2. `CONTRIBUTING.md`\n\nWorkspace facts:\n\n- Describe project-specific rules here.\n\n---"
+}

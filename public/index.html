@@ -117,6 +117,15 @@
     color: var(--fg-soft);
     flex-shrink: 0;
     transition: color 100ms;
+    position: relative;
+  }
+  /* global unread indicator on the drawer-open (☰) button */
+  .nav-unread-dot {
+    position: absolute;
+    top: 9px; right: 9px;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
   }
   .nav-btn:active { color: var(--fg); background: var(--hover); }
   .nav-btn:disabled { opacity: 0.45; cursor: default; }
@@ -286,6 +295,17 @@
   .sys.restart { color: var(--st-interrupted); border-color: rgba(250, 204, 21, 0.3); }
   .sys.swap    { color: var(--accent); border-color: currentColor; }
   .sys.error   { color: var(--st-error); border-color: rgba(239, 68, 68, 0.45); }
+  .sys.restart.code-window {
+    align-self: stretch;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    color: var(--fg);
+  }
+  .sys.restart.code-window .md-pre {
+    margin: 0;
+  }
   .sys.auto-commit,
   .sys.tool-diff {
     align-self: stretch;
@@ -298,6 +318,7 @@
   .sys.auto-commit .md-pre,
   .sys.tool-diff .md-pre {
     max-height: 360px;
+    overflow-y: auto;
   }
 
   /* tool inline */
@@ -475,9 +496,13 @@
     border-bottom-color: rgba(56, 189, 248, 0.25);
   }
   .banner.resume {
-    background: rgba(250, 204, 21, 0.06);
-    color: var(--st-interrupted);
-    border-bottom-color: rgba(250, 204, 21, 0.22);
+    display: block;
+    background: transparent;
+    color: var(--fg);
+    border-bottom-color: var(--border);
+  }
+  .banner.resume .md-pre {
+    margin: 0;
   }
   .banner .b-spinner {
     width: 9px; height: 9px;
@@ -634,6 +659,21 @@
   }
   .sess.archived { opacity: 0.5; }
   .sess.archived .sess-name { color: var(--fg-dim); }
+
+  /* unread agent-message count badge on a session row */
+  .sess .unread-badge {
+    flex-shrink: 0;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 18px;
+    text-align: center;
+  }
 
   .stop-btn {
     width: 32px; height: 32px;
@@ -1268,6 +1308,17 @@
     overflow-wrap: normal;
     word-break: normal;
   }
+  .md-pre.lang-bash,
+  .md-pre.lang-sh,
+  .md-pre.lang-shell,
+  .md-pre.lang-zsh,
+  .md-pre.lang-powershell,
+  .md-pre.lang-pwsh,
+  .md-pre.lang-ps1 {
+    max-height: 220px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .md-pre code {
     font-family: var(--font-mono);
     color: var(--fg);
@@ -1445,17 +1496,17 @@
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
-<script src="data.js"></script>
-<script type="text/babel" src="md.jsx"></script>
-<script type="text/babel" src="slash.jsx"></script>
-<script type="text/babel" src="thread.jsx"></script>
-<script type="text/babel" src="drawer.jsx"></script>
-<script type="text/babel" src="new-session.jsx"></script>
-<script type="text/babel" src="opts.jsx"></script>
-<script type="text/babel" src="rename.jsx"></script>
-<script type="text/babel" src="row-actions.jsx"></script>
-<script type="text/babel" src="settings.jsx"></script>
-<script type="text/babel" src="usage-card.jsx"></script>
-<script type="text/babel" src="app.jsx"></script>
+<script src="data.js?v=20260608-bashscroll"></script>
+<script type="text/babel" src="md.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="slash.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="thread.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="drawer.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="new-session.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="opts.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="rename.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="row-actions.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="settings.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="usage-card.jsx?v=20260608-bashscroll"></script>
+<script type="text/babel" src="app.jsx?v=20260608-bashscroll"></script>
 </body>
 </html>
