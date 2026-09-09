@@ -31,7 +31,7 @@ function Settings({ onClose }) {
   const [theme,    setTheme]    = useStateS('terminal');
   const [density,  setDensity]  = useStateS('regular');
   const [defEng,   setDefEng]   = useStateS('claude');
-  const [defModel, setDefModel] = useStateS('sonnet');
+  const [defModel, setDefModel] = useStateS('claude-sonnet-5');
   const [notifApprove, setNotifApprove] = useStateS(true);
   const [notifDone,    setNotifDone]    = useStateS(true);
   const [notifOutput,  setNotifOutput]  = useStateS(
@@ -170,7 +170,7 @@ function Settings({ onClose }) {
               right={
                 <div className="seg">
                   <button className={defEng === 'claude' ? 'on' : ''}
-                    onClick={() => { setDefEng('claude'); setDefModel('sonnet'); }}>cl</button>
+                    onClick={() => { setDefEng('claude'); setDefModel('claude-sonnet-5'); }}>cl</button>
                   <button className={defEng === 'codex' ? 'on' : ''}
                     onClick={() => { setDefEng('codex'); setDefModel('default'); }}>cx</button>
                 </div>
