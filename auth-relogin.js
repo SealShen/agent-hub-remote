@@ -23,17 +23,20 @@ import { killTree, verifyClaudeAuth } from './engines.js';
 
 const AUTHORIZE_URL_RE = /(https?:\/\/[^\s'"]*\/oauth\/authorize\?[^\s'"]+)/i;
 
-const URL_WAIT_MS = 30_000;
-const LOGIN_TTL_MS = 10 * 60_000;
-const CODE_SETTLE_MS = 20_000;
+const URL_WAIT_MS = 30_000;        // 等 CLI 吐出授權 URL
+const LOGIN_TTL_MS = 10 * 60_000;  // 使用者在手機上完成登入的窗口
+const CODE_SETTLE_MS = 20_000;     // 送出碼之後等 CLI 收斂
 
-let pending = null;
+let pending = null;   // { proc, url, continuation, startedAt, expiresAt, timer, busy, stderr, exited }
 
+// 對外狀態刻意不含 url 與 continuation：能否完成登入只取決於持有 continuation，
+// 頁面重整遺失就重跑一次 start（要再過一次 passkey），比讓狀態端點外流連結安全。
 export function reloginStatus() {
   if (!pending) return { pending: false };
   return { pending: true, startedAt: pending.startedAt, expiresAt: pending.expiresAt };
 }
 
+// 一律走這裡收尾：清 timer、砍進程、把 module state 歸零。
 export function cancelRelogin() {
   if (!pending) return false;
   const p = pending;
@@ -51,17 +54,24 @@ function continuationMatches(supplied) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// 呼叫端（HTTP 層）必須先驗過 step-up action-token。
+// 既有 flow 一律砍掉重開：能走到這裡就代表通過 step-up，是本人的意思；
+// 同時跑兩條 login 會讓使用者手上的碼對不上還活著的那個 code_verifier。
 export async function startRelogin({ spawnImpl = spawnCli } = {}) {
   cancelRelogin();
 
   const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_API_KEY;   // 與 runEngine 一致：走訂閱 OAuth
+  // best-effort 抑制主機端彈出瀏覽器（AHR 以背景排程執行，沒人在螢幕前）。
+  // 註：未驗證 Claude CLI 是否採用 BROWSER 慣例；沒被採用也只是照舊彈窗，不影響流程。
   env.BROWSER = 'none';
 
   let proc;
   try {
     proc = spawnImpl('claude', ['auth', 'login', '--claudeai'], {
-      stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env,
+      windowsHide: true,
     });
   } catch (e) {
     return { ok: false, error: `spawn failed: ${String(e && e.message || e)}` };
@@ -69,9 +79,15 @@ export async function startRelogin({ spawnImpl = spawnCli } = {}) {
 
   const startedAt = Date.now();
   const entry = {
-    proc, url: null, continuation: crypto.randomBytes(32).toString('base64url'),
-    startedAt, expiresAt: startedAt + LOGIN_TTL_MS,
-    timer: null, busy: false, stderr: '', exited: false,
+    proc,
+    url: null,
+    continuation: crypto.randomBytes(32).toString('base64url'),
+    startedAt,
+    expiresAt: startedAt + LOGIN_TTL_MS,
+    timer: null,
+    busy: false,
+    stderr: '',
+    exited: false,
   };
   pending = entry;
 
@@ -114,12 +130,22 @@ export async function startRelogin({ spawnImpl = spawnCli } = {}) {
   }
 
   entry.url = url;
-  return { ok: true, url, continuation: entry.continuation, startedAt: entry.startedAt, expiresAt: entry.expiresAt };
+  return {
+    ok: true,
+    url,
+    continuation: entry.continuation,
+    startedAt: entry.startedAt,
+    expiresAt: entry.expiresAt,
+  };
 }
 
+// code 只在這個函式的參數與 stdin write 之間存在，不外流、不留存。
+// 成敗以 verifyClaudeAuth() 為準，而不是解析 CLI 文字：文案會變，登入狀態不會。
 export async function submitReloginCode(continuation, rawCode, { verify = verifyClaudeAuth } = {}) {
   if (!pending) return { ok: false, error: 'no pending login', restart: true };
-  if (!continuationMatches(continuation)) return { ok: false, error: 'continuation mismatch', restart: true };
+  if (!continuationMatches(continuation)) {
+    return { ok: false, error: 'continuation mismatch', restart: true };
+  }
   if (pending.busy) return { ok: false, error: 'a code is already being verified' };
 
   const code = String(rawCode == null ? '' : rawCode).trim();
@@ -139,6 +165,7 @@ export async function submitReloginCode(continuation, rawCode, { verify = verify
       return { ok: false, error: `寫入失敗：${String(e && e.message || e)}`, restart: true };
     }
 
+    // 等 CLI 收斂：正常情況它會結束；錯碼可能結束也可能重新提示，兩種都等得到。
     await new Promise(resolve => {
       if (entry.exited) return resolve();
       const t = setTimeout(resolve, CODE_SETTLE_MS);
@@ -152,6 +179,7 @@ export async function submitReloginCode(continuation, rawCode, { verify = verify
       return { ok: true, loggedIn: true };
     }
 
+    // 還沒登入成功。CLI 若仍活著就讓使用者直接重貼一次，不必重跑整個 flow。
     const canRetry = !entry.exited && !!entry.proc.stdin && entry.proc.stdin.writable;
     const hint = /invalid code/i.test(entry.stderr) ? '授權碼無效或未完整複製' : '登入尚未完成';
     if (!canRetry) {
