@@ -10,6 +10,10 @@ Before non-trivial changes:
   conversation logs unless the user explicitly asks and the request is safe.
 - Prefer PowerShell commands on Windows.
 - Use `rg` for search and keep reads narrow for large files.
+- When the user supplies a bare session/conversation ID or prefix, run
+  `node scripts/locate-session-id.mjs <id>` before choosing AHR or Codex storage.
+  Do not infer the source from the current UI. Treat `ambiguous` and `not_found`
+  as blockers instead of continuing under an assumed source.
 
 Validation:
 

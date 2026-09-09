@@ -41,7 +41,7 @@ function ProjectChips({ projectFilter, setProjectFilter, sessions, onNew }) {
 function SessRow({ s, active, onTap, onStop, onLongPress, unread }) {
   const accent = window.ACCENTS[s.accent || 0];
   const showStop = s.status === 'running' || s.status === 'starting';
-  const unreadCount = unread > 0 ? unread : 0;
+  const unreadCount = unread > 0 && window.AHR_showsUnread(s) ? unread : 0;
   const longPress = window.useLongPress
     ? window.useLongPress(() => onLongPress?.(s), 480)
     : {};
