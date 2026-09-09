@@ -2,7 +2,10 @@
 // Per-session controls: engine swap · model · flags · rename · archive · delete · meta.
 
 const { useState: useStateO } = React;
-const CLAUDE_MODEL_ORDER = window.AHR_CLAUDE_MODEL_ORDER || ['sonnet', 'opus', 'haiku'];
+const CLAUDE_MODEL_ORDER = window.AHR_CLAUDE_MODEL_ORDER || ['sonnet', 'opus', 'haiku', 'fable'];
+// 與 engines.js 的 CLAUDE_DEFAULT_MODEL 對齊；不要用 CLAUDE_MODEL_ORDER[0] 頂替，
+// 那只是「剛好相同」，清單重排就會讓面板顯示與實際 spawn 的 model 不一致。
+const CLAUDE_DEFAULT_MODEL = window.AHR_CLAUDE_DEFAULT_MODEL || 'sonnet';
 
 function OptRow({ label, sub, right, onClick, danger, warn }) {
   const cls = `row ${danger ? 'danger' : ''} ${warn ? 'warn' : ''}`;
@@ -26,8 +29,25 @@ function shortId(id) {
 }
 
 function MetaId({ k, v }) {
+  const [copied, setCopied] = useStateO(false);
   if (!v) return null;
-  return <div><span className="k">{k}</span>{' '}<span className="v">{shortId(v)}</span></div>;
+  const copy = async () => {
+    if (!navigator.clipboard?.writeText) return;
+    await navigator.clipboard.writeText(String(v));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span className="k">{k}</span>{' '}<span className="v">{shortId(v)}</span>
+      </span>
+      <button className="nav-btn" onClick={copy} aria-label={`copy ${k}`} title={`Copy full ${k}`}
+        style={{ flex: '0 0 auto', width: 28, height: 24, fontSize: 11 }}>
+        {copied ? '✓' : '⧉'}
+      </button>
+    </div>
+  );
 }
 
 function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
@@ -36,7 +56,7 @@ function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
   const accent = window.ACCENTS[session.accent || 0];
   const selectedModel = session.agentType === 'codex'
     ? 'default'
-    : (session.model || CLAUDE_MODEL_ORDER[0]);
+    : (session.model || CLAUDE_DEFAULT_MODEL);
 
   const modelList = session.agentType === 'claude'
     ? CLAUDE_MODEL_ORDER
@@ -92,7 +112,8 @@ function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
 
           <div className="sec">
             <div className="sec-h">model</div>
-            <div className={`opt-grid ${modelList.length === 3 ? 'cols-3' : ''}`}>
+            {/* 預設 2 欄：claude 四個 model 排成 2×2，手機上比擠成一排好按 */}
+            <div className="opt-grid">
               {modelList.map(m => (
                 <button key={m}
                   className={`opt ${selectedModel === m ? 'on' : ''}`}
@@ -124,13 +145,14 @@ function Options({ session, onClose, onSwapEngine, onChangeModel, onToggleAuto,
             <div className="sec-h" style={{ padding: '14px 14px 8px' }}>metadata</div>
             <div className="row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4, paddingTop: 8, paddingBottom: 10 }}>
               <div className="su-meta" style={{ width: '100%' }}>
-                <div><span className="k">hub id</span>{' '}<span className="v">{shortId(session.sessionId)}</span></div>
+                <MetaId k="hub id" v={session.sessionId}/>
                 <MetaId k="claude id" v={refs.claude}/>
                 <MetaId k="codex id" v={refs.codex}/>
                 {resetLabel ? <div><span className="k">{resetLabel}</span></div> : null}
                 <MetaId k="old claude" v={resetRefs.claude}/>
                 <MetaId k="old codex" v={resetRefs.codex}/>
                 <div><span className="k">cwd</span>{' '}<span className="v">{session.cwd}</span></div>
+                {session.effort ? <div><span className="k">effort</span>{' '}<span className="v">{session.effort}</span></div> : null}
                 <div><span className="k">msgs</span>{' '}<span className="v">{session.msgCount}</span></div>
               </div>
             </div>
