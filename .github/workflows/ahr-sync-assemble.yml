@@ -21,61 +21,54 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Assemble exact private blobs and sanitize public-only comments
+      - name: Assemble verified sanitized snapshot
         shell: python
         run: |
-          import base64
-          from pathlib import Path
+          import base64, hashlib, json, zipfile
+          from pathlib import Path, PurePosixPath
 
-          def assemble(name):
-              parts = sorted(Path('.sync').glob(f'{name}.part.*.b64'))
-              if not parts:
-                  raise SystemExit(f'no parts for {name}')
-              data = b''.join(base64.b64decode(p.read_text(encoding='ascii').strip()) for p in parts)
-              Path(name).write_bytes(data)
-              return data
+          payload = Path('.sync')
+          manifest = json.loads((payload / 'manifest.json').read_text(encoding='utf-8'))
+          parts = sorted(payload.glob('archive.part.*.b64'))
+          if len(parts) != int(manifest['parts']):
+              raise SystemExit('payload part count mismatch')
+          raw = b''.join(base64.b64decode(p.read_text(encoding='ascii').strip()) for p in parts)
+          if len(raw) != int(manifest['archive_bytes']):
+              raise SystemExit('archive byte count mismatch')
+          if hashlib.sha256(raw).hexdigest() != manifest['archive_sha256']:
+              raise SystemExit('archive sha256 mismatch')
 
-          engines = assemble('engines.js')
-          if __import__('hashlib').sha1(b'blob ' + str(len(engines)).encode() + b'\0' + engines).hexdigest() != '7fd521a3c8b2148c9b6f94f9d3aef7348009168a':
-              raise SystemExit('engines.js private blob SHA mismatch')
-
-          server = assemble('server.js')
-          old = 'MyClaw 實測 330 vs 20'.encode()
-          new = 'local run 實測 330 vs 20'.encode()
-          if server.count(old) != 1:
-              raise SystemExit('unexpected server.js sanitizer match count')
-          Path('server.js').write_bytes(server.replace(old, new))
-
-          harness = assemble('harness-outcomes.js')
-          old = '實測 MyClaw state 記 610 筆而 log 有 613 筆。'.encode()
-          new = '實測 local state 記 610 筆而 log 有 613 筆。'.encode()
-          if harness.count(old) != 1:
-              raise SystemExit('unexpected harness-outcomes.js sanitizer match count')
-          Path('harness-outcomes.js').write_bytes(harness.replace(old, new))
-
-      - name: Remove temporary sync payload
-        run: git rm -r .sync .github/workflows/ahr-sync-assemble.yml
+          archive = Path('.sync/archive.zip')
+          archive.write_bytes(raw)
+          with zipfile.ZipFile(archive) as z:
+              for info in z.infolist():
+                  rel = PurePosixPath(info.filename)
+                  if rel.is_absolute() or '..' in rel.parts:
+                      raise SystemExit(f'unsafe archive path: {info.filename}')
+              z.extractall('.')
 
       - name: Public export guard
         shell: python
         run: |
-          import pathlib, re, subprocess
-          forbidden = [re.compile(x, re.I) for x in [r'leond', r'MyClaw', r'Netivism', r'SealShen', r'tail92', r'100\.80\.102']]
+          from pathlib import Path
+          import re
+
           forbidden_names = {'.env', 'dirs.json', 'auth-audit.jsonl'}
+          forbidden = [re.compile(x, re.I) for x in [r'leond', r'MyClaw', r'Netivism', r'SealShen', r'tail92', r'100\.80\.102']]
           bad = []
-          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
-              if not raw:
+          for p in Path('.').rglob('*'):
+              if not p.is_file() or '.git' in p.parts or '.sync' in p.parts or 'node_modules' in p.parts:
                   continue
-              rel = raw.decode('utf-8')
-              p = pathlib.Path(rel)
-              if p.name in forbidden_names or '.state' in p.parts or 'node_modules' in p.parts or p.suffix == '.log' or rel.endswith('.ts.net.crt') or rel.endswith('.ts.net.key'):
+              if p.as_posix() == '.github/workflows/ahr-sync-assemble.yml':
+                  continue
+              rel = p.as_posix()
+              if p.name in forbidden_names or '.state' in p.parts or rel.endswith('.log') or rel.endswith('.ts.net.crt') or rel.endswith('.ts.net.key'):
                   bad.append(f'forbidden path: {rel}')
                   continue
               try:
                   text = p.read_text(encoding='utf-8')
-              except (UnicodeDecodeError, OSError):
+              except UnicodeDecodeError:
                   continue
               for pat in forbidden:
                   if pat.search(text):
@@ -83,14 +76,19 @@ jobs:
           if bad:
               raise SystemExit('\n'.join(bad))
 
-      - run: npm ci
-      - run: npm test
-      - run: git diff --check
-
-      - name: Commit assembled public-safe core
+      - name: Install and test public snapshot
         run: |
+          npm ci
+          npm test
+
+      - name: Commit tested snapshot overlay
+        shell: bash
+        run: |
+          git add -A
+          git reset -- .sync .github/workflows/ahr-sync-assemble.yml
+          git diff --cached --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "sync: assemble public-safe runtime core"
+          SOURCE=$(python -c "import json; print(json.load(open('.sync/manifest.json'))['source_commit'][:12])")
+          git commit -m "sync: import sanitized agent-hub-remote ${SOURCE}"
           git push origin HEAD:${GITHUB_REF_NAME}
