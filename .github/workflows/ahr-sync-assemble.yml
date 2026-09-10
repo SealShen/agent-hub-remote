@@ -1,0 +1,96 @@
+name: AHR public-safe sync assembler
+
+on:
+  push:
+    branches:
+      - sync-public-safe-2026-09-10
+    paths:
+      - .sync/READY
+
+permissions:
+  contents: write
+
+jobs:
+  assemble-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Assemble exact private blobs and sanitize public-only comments
+        shell: python
+        run: |
+          import base64
+          from pathlib import Path
+
+          def assemble(name):
+              parts = sorted(Path('.sync').glob(f'{name}.part.*.b64'))
+              if not parts:
+                  raise SystemExit(f'no parts for {name}')
+              data = b''.join(base64.b64decode(p.read_text(encoding='ascii').strip()) for p in parts)
+              Path(name).write_bytes(data)
+              return data
+
+          engines = assemble('engines.js')
+          if __import__('hashlib').sha1(b'blob ' + str(len(engines)).encode() + b'\0' + engines).hexdigest() != '7fd521a3c8b2148c9b6f94f9d3aef7348009168a':
+              raise SystemExit('engines.js private blob SHA mismatch')
+
+          server = assemble('server.js')
+          old = 'MyClaw 實測 330 vs 20'.encode()
+          new = 'local run 實測 330 vs 20'.encode()
+          if server.count(old) != 1:
+              raise SystemExit('unexpected server.js sanitizer match count')
+          Path('server.js').write_bytes(server.replace(old, new))
+
+          harness = assemble('harness-outcomes.js')
+          old = '實測 MyClaw state 記 610 筆而 log 有 613 筆。'.encode()
+          new = '實測 local state 記 610 筆而 log 有 613 筆。'.encode()
+          if harness.count(old) != 1:
+              raise SystemExit('unexpected harness-outcomes.js sanitizer match count')
+          Path('harness-outcomes.js').write_bytes(harness.replace(old, new))
+
+      - name: Remove temporary sync payload
+        run: git rm -r .sync .github/workflows/ahr-sync-assemble.yml
+
+      - name: Public export guard
+        shell: python
+        run: |
+          import pathlib, re, subprocess
+          forbidden = [re.compile(x, re.I) for x in [r'leond', r'MyClaw', r'Netivism', r'SealShen', r'tail92', r'100\.80\.102']]
+          forbidden_names = {'.env', 'dirs.json', 'auth-audit.jsonl'}
+          bad = []
+          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
+              if not raw:
+                  continue
+              rel = raw.decode('utf-8')
+              p = pathlib.Path(rel)
+              if p.name in forbidden_names or '.state' in p.parts or 'node_modules' in p.parts or p.suffix == '.log' or rel.endswith('.ts.net.crt') or rel.endswith('.ts.net.key'):
+                  bad.append(f'forbidden path: {rel}')
+                  continue
+              try:
+                  text = p.read_text(encoding='utf-8')
+              except (UnicodeDecodeError, OSError):
+                  continue
+              for pat in forbidden:
+                  if pat.search(text):
+                      bad.append(f'forbidden content {pat.pattern}: {rel}')
+          if bad:
+              raise SystemExit('\n'.join(bad))
+
+      - run: npm ci
+      - run: npm test
+      - run: git diff --check
+
+      - name: Commit assembled public-safe core
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "sync: assemble public-safe runtime core"
+          git push origin HEAD:${GITHUB_REF_NAME}
