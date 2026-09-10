@@ -1,4 +1,17 @@
 {
-  "url": "https://sdmntpreastus.oaiusercontent.com/files/00000000-01d4-81f9-858e-c66681ed67b3/raw?se=2026-09-10T11%3A12%3A45Z&sp=r&sv=2026-02-06&sr=b&scid=aafbf618-2a43-56d0-8111-fabc441a2b66&skoid=0b778285-7b0b-4cdc-ac3b-fb93e8c3686f&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-09-10T08%3A16%3A32Z&ske=2026-09-11T08%3A16%3A32Z&sks=b&skv=2026-02-06&sig=yhDGX3%2BEqZ/Fwo3YtFj6TJhsgjglhCY2j6xPMPzQBF0%3D",
-  "artifact_sha256": "15fa9fc8c37844412d42f2a82f7df6a9ef934ee9b9586b62668debe8aaa65015"
+  "manifest": {
+    "source_commit": "3be2a33ac8187daa544278f9b8eda1f02a964a3f",
+    "source_subtree": "5b1920062162aff7bcea5e3bb10b4460af7b4c7d",
+    "archive_sha256": "d02925ed03a020f2e7b0cba915d464f414b2292403e0c7c7072d05502da90363",
+    "archive_bytes": 388641,
+    "parts": 6
+  },
+  "part_urls": [
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.000.b64?token=AYHMO4EOZMZUVMKLGLTAXNTKUKIF7AA",
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.001.b64?token=AYHMO4FCHLH4YX4UK4QCH63KUKIF7AA",
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.002.b64?token=AYHMO4A7DOJ2FUSXIZI23TTKUKIF7AA",
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.003.b64?token=AYHMO4BIXILH2226GGG3YRTKUKIF7AA",
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.004.b64?token=AYHMO4E7EWMRAULIVROJNYDKUKIF7AA",
+    "https://raw.githubusercontent.com/SealShen/Seal_Bot/myclaw/.public-sync-payload/archive.part.005.b64?token=AYHMO4FQPTIXXG3XUFBMSLDKUKIF7AA"
+  ]
 }
