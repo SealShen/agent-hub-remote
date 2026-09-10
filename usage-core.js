@@ -13,14 +13,14 @@ import os from 'os';
 import path from 'path';
 
 const HOME = os.homedir();
-const STATUS_JSON = path.join(HOME, '.claude', 'usage-status.json');
+const STATUS_JSON = process.env.AHR_CLAUDE_USAGE_STATUS || path.join(HOME, '.claude', 'usage-status.json');
 const CLAUDE_USAGE_LOG = process.env.AHR_CLAUDE_USAGE_LOG ||
   path.join(HOME, '.claude', 'usage-log.jsonl');
-const CODEX_SESSIONS = path.join(HOME, '.codex', 'sessions');
+const CODEX_SESSIONS = process.env.AHR_CODEX_SESSIONS_DIR || path.join(HOME, '.codex', 'sessions');
 const CODEX_USAGE_LOG = process.env.AHR_CODEX_USAGE_LOG ||
   path.join(HOME, '.codex', 'usage-log.jsonl');
 const CREDENTIALS_FILE = path.join(HOME, '.claude', '.credentials.json');
-const API_CACHE_FILE = path.join(HOME, '.claude', 'usage-api-cache.json');
+const API_CACHE_FILE = process.env.AHR_USAGE_API_CACHE || path.join(HOME, '.claude', 'usage-api-cache.json');
 const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage';
 const API_POLL_MS = 60_000;
 const API_CACHE_TTL_MS = 5 * 60_000;          // 視為「新鮮」的門檻（僅標記 stale 用）
@@ -86,10 +86,9 @@ function localDateKey(ms) {
 
 function normPct(v) {
   if (v == null) return null;
-  let f = Number(v);
-  if (!isFinite(f)) return null;
-  if (f >= 0 && f <= 1) f *= 100;       // 0~1 比例 → %
-  return Math.max(0, Math.min(100, Math.round(f * 10) / 10));
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) return null;
+  // These provider fields are percentages, including 0.5% and 1%.
+  return Math.round(v * 10) / 10;
 }
 
 // ---- 來源 1：statusLine 落地的訂閱配額 ----
@@ -116,8 +115,10 @@ function readClaudeQuotaFromStatusLine() {
     const resetWk = toMs(q7.reset) ?? deepFindResetMs(raw, /(seven.?day|week|7d).*(reset|expire|renew)/i);
     return {
       available: s5 != null || wk != null,
-      session_pct: s5,
-      weekly_pct: wk,
+      session_pct: reset5 != null && reset5 <= Date.now() ? null : s5,
+      weekly_pct: resetWk != null && resetWk <= Date.now() ? null : wk,
+      session_expired: reset5 != null && reset5 <= Date.now(),
+      weekly_expired: resetWk != null && resetWk <= Date.now(),
       session_reset_ms: reset5,
       weekly_reset_ms: resetWk,
       captured_at: capturedAt,
@@ -164,8 +165,8 @@ function readClaudeQuotaFromApiCache() {
   // 配額視窗會週期歸零（5h / 7d）。cache 不再 fresh 且該 window 的 resets_at 已過 →
   // 舊讀數屬於「上一個已結束的視窗」，不能再當「目前」呈現（否則 UI 會把上一輪跑掉的 %
   // 當成這一輪在用）。此時把該 bucket 的 pct 設 null 並標記 expired，讓 UI 誠實顯示「待新讀數」。
-  const sessionExpired = !fresh && reset5 != null && reset5 <= now;
-  const weeklyExpired = !fresh && reset7 != null && reset7 <= now;
+  const sessionExpired = reset5 != null && reset5 <= now;
+  const weeklyExpired = reset7 != null && reset7 <= now;
   const session_pct = sessionExpired ? null : s5;
   const weekly_pct = weeklyExpired ? null : wk;
   return {
@@ -482,9 +483,9 @@ function _scanCodexRecursive(dir, depth = 0) {
   }
   return best;
 }
-function newestCodexJsonl(dir) {
+function newestCodexJsonl(dir, force = false) {
   // Fast path：父目錄與檔本身都還在、父目錄 mtime 未變 → cache 有效。
-  if (_codexNewestCache) {
+  if (!force && _codexNewestCache) {
     try {
       const fileSt = fs.statSync(_codexNewestCache.path);
       const parentSt = fs.statSync(_codexNewestCache.parent);
@@ -507,27 +508,41 @@ function newestCodexJsonl(dir) {
 
 function readCodexQuota() {
   try {
-    const f = newestCodexJsonl(CODEX_SESSIONS);
+    // Appending another existing file does not change directory mtime.
+    // Recheck file mtimes whenever the outer usage cache is refreshed.
+    const f = newestCodexJsonl(CODEX_SESSIONS, true);
     if (!f) return { available: false };
     const lines = fs.readFileSync(f.path, 'utf-8').split('\n');
     // Scan all lines to get the last rate_limits entry (newest reading)
-    let primary = null, secondary = null;
+    let primary = null, secondary = null, capturedAt = null;
+    let primaryReset = null, secondaryReset = null;
     for (const ln of lines) {
       if (!ln || !ln.includes('rate_limit')) continue;
       let d; try { d = JSON.parse(ln); } catch { continue; }
       // Schema: d.payload.rate_limits.{primary,secondary}.used_percent
       const rl = d?.payload?.rate_limits;
       if (!rl || typeof rl !== 'object') continue;
+      if (rl.limit_id && rl.limit_id !== 'codex') continue;
       const p = rl.primary?.used_percent;
       const s = rl.secondary?.used_percent;
-      if (p != null) primary = normPct(p);
-      if (s != null) secondary = normPct(s);
+      if (normPct(p) == null && normPct(s) == null) continue;
+      primary = normPct(p);
+      secondary = normPct(s);
+      capturedAt = toMs(d.timestamp);
+      primaryReset = toMs(rl.primary?.resets_at);
+      secondaryReset = toMs(rl.secondary?.resets_at);
     }
     if (primary != null || secondary != null) {
       return {
         available: true,
-        primary_pct: primary,
-        secondary_pct: secondary,
+        primary_pct: primaryReset != null && primaryReset <= Date.now() ? null : primary,
+        secondary_pct: secondaryReset != null && secondaryReset <= Date.now() ? null : secondary,
+        primary_reset_ms: primaryReset,
+        secondary_reset_ms: secondaryReset,
+        primary_expired: primaryReset != null && primaryReset <= Date.now(),
+        secondary_expired: secondaryReset != null && secondaryReset <= Date.now(),
+        captured_at: capturedAt,
+        stale: !capturedAt || Date.now() - capturedAt > API_CACHE_TTL_MS,
         mtime_ms: f.mtime,
         source: path.basename(f.path),
       };

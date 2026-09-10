@@ -45,5 +45,5 @@ Register-ScheduledTask -TaskName $taskName `
   -Action $action -Trigger @($trigLogon, $trigPoll) `
   -Settings $settings -Principal $principal -Force
 
-Write-Host "Registered $taskName (At Logon + 5min watchdog + hourly background restart + restart-on-failure)." -ForegroundColor Green
+Write-Host "Registered $taskName (At Logon + 5min watchdog + 12-hourly background restart + restart-on-failure)." -ForegroundColor Green
 Write-Host "Start: Start-ScheduledTask -TaskName $taskName" -ForegroundColor Cyan

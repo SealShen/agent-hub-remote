@@ -49,9 +49,10 @@ const STARTUP_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 try { fs.mkdirSync(AUTH_STATE_DIR, { recursive: true }); } catch {}
 
 // 危險動作白名單（spec §5.4）
-const ACTIONS = new Set(['restart', 'autoallow-on', 'create-with-autoallow', 'startup', 'mint-local-token', 'review-flow']);
-// 不需要既有 sessionId 的動作（restart 全域；create-with-autoallow 在 session 建立前簽發）
-const SESSIONLESS_ACTIONS = new Set(['restart', 'create-with-autoallow', 'startup', 'mint-local-token']);
+const ACTIONS = new Set(['restart', 'autoallow-on', 'create-with-autoallow', 'startup', 'mint-local-token', 'review-flow', 'relogin']);
+// 不需要既有 sessionId 的動作（restart 全域；create-with-autoallow 在 session 建立前簽發；
+// relogin 換的是整台機器的引擎憑證，與任何單一 session 無關）
+const SESSIONLESS_ACTIONS = new Set(['restart', 'create-with-autoallow', 'startup', 'mint-local-token', 'relogin']);
 
 let TOTP_SECRET = process.env.TOTP_SECRET;
 

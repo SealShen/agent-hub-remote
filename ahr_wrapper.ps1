@@ -22,7 +22,7 @@ if (-not $env:AHR_HTTP_PORT) {
   }
 }
 
-$restartAfter = New-TimeSpan -Hours 2
+$restartAfter = New-TimeSpan -Hours 12
 $restartDelay = New-TimeSpan -Seconds 5
 # Graceful recycle: when maxRuntime is reached, only restart once no session is
 # running/starting. Re-check on this interval; force the restart if still busy
@@ -43,13 +43,12 @@ function Write-AhrLog {
 
 function Get-AhrActiveSessionCount {
   # Returns the number of sessions currently running/starting via the server's
-  # loopback /sessions endpoint. Returns -1 if the server is unreachable, which
+  # loopback supervisor endpoint. Returns -1 if the server is unreachable, which
   # the caller treats as "recycle now" (an unresponsive server should be killed).
   $port = $env:AHR_HTTP_PORT
   try {
-    $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$port/sessions" -TimeoutSec 5 -ErrorAction Stop
-    $active = @($resp | Where-Object { $_.status -eq 'running' -or $_.status -eq 'starting' })
-    return $active.Count
+    $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$port/supervisor/active-sessions" -TimeoutSec 5 -ErrorAction Stop
+    return [int]$resp.activeCount
   } catch {
     return -1
   }
